@@ -12,6 +12,7 @@ import re
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+_CACHE = None
 VERSION_FILE = os.path.join(HERE, "VERSION")
 
 _RE_SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
@@ -68,16 +69,22 @@ def full_version():
 
 
 def summary():
-    """给 /api/status 用的一小撮信息。"""
-    base = base_version()
-    count, sha, dirty = git_info()
-    return {
-        "version": full_version(),
-        "base": base,
-        "commit": sha,
-        "commits": count,
-        "dirty": dirty,
-    }
+    """给 /api/status 用的一小撮信息。
+
+    进程生命周期内版本不会变，算一次就缓存——避免每个 HTTP 请求都去跑 git。
+    """
+    global _CACHE
+    if _CACHE is None:
+        base = base_version()
+        count, sha, dirty = git_info()
+        _CACHE = {
+            "version": full_version(),
+            "base": base,
+            "commit": sha,
+            "commits": count,
+            "dirty": dirty,
+        }
+    return dict(_CACHE)
 
 
 if __name__ == "__main__":
