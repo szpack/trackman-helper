@@ -81,9 +81,17 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION
-          git commit -m "chore(release): v${{ steps.ver.outputs.version }} [skip ci]"
+
+          # 首次发版时 VERSION 不变，此时没有可提交内容——不能直接 commit，
+          # 否则 git 报 "nothing to commit" 并以 1 退出，把整个工作流带挂。
+          if git diff --cached --quiet; then
+            echo "VERSION 无变化，跳过提交（首次发版）"
+          else
+            git commit -m "chore(release): v${{ steps.ver.outputs.version }} [skip ci]"
+            git push origin HEAD:main
+          fi
+
           git tag -a "v${{ steps.ver.outputs.version }}" -m "v${{ steps.ver.outputs.version }}"
-          git push origin HEAD:main
           git push origin "v${{ steps.ver.outputs.version }}"
           echo "released=true" >> "$GITHUB_OUTPUT"
 
