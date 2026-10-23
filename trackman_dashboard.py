@@ -792,6 +792,8 @@ def main():
     ap.add_argument("--demo", action="store_true", help="模拟数据演示（无设备时用）")
     ap.add_argument("--no-ai", action="store_true", help="关闭 AI 分析，只出规则诊断")
     ap.add_argument("--open", action="store_true", help="启动后自动用默认浏览器打开看板")
+    ap.add_argument("--version", action="version",
+                    version=f"trackman-helper {_ver.full_version()}")
     args = ap.parse_args()
 
     persist = Path(args.persist) if args.persist else None
