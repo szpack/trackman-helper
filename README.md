@@ -1,5 +1,8 @@
 # TrackMan Helper
 
+[![version](https://img.shields.io/github/v/tag/szpack/trackman-helper?label=version&color=3fb950)](https://github.com/szpack/trackman-helper/releases)
+[![Auto Release](https://github.com/szpack/trackman-helper/actions/workflows/release.yml/badge.svg)](https://github.com/szpack/trackman-helper/actions/workflows/release.yml)
+
 从 TrackMan Performance Studio 实时抓取每一次击球数据的工具集。
 
 核心原理：**TPS 在 `localhost:21581` 开了个 WebSocket，每产生一次击球就把设备原始 JSON 原样广播给所有订阅者。** 不用抓包、不用 hook 进程、不用登录设备。

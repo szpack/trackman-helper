@@ -99,6 +99,7 @@ jobs:
         if: steps.commit.outputs.released == 'true'
         run: |
           PREV=$(git describe --tags --abbrev=0 "v${{ steps.ver.outputs.version }}^" 2>/dev/null || echo "")
+          # --invert-grep 把发版自己那条 chore(release) 剔掉，否则每个 Release 都会带上它
           {
             echo "## v${{ steps.ver.outputs.version }}"
             echo ""
@@ -106,10 +107,12 @@ jobs:
             echo ""
             if [ -n "$PREV" ]; then
               echo "### 变更（自 $PREV）"
-              git log "$PREV..v${{ steps.ver.outputs.version }}" --no-merges --pretty="- %s"
+              git log "$PREV..v${{ steps.ver.outputs.version }}" --no-merges \
+                --invert-grep --grep="^chore(release)" --pretty="- %s"
             else
               echo "### 首次发布"
-              git log "v${{ steps.ver.outputs.version }}" --no-merges --pretty="- %s" | head -40
+              git log "v${{ steps.ver.outputs.version }}" --no-merges \
+                --invert-grep --grep="^chore(release)" --pretty="- %s" | head -40
             fi
           } > RELEASE_NOTES.md
 
