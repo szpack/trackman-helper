@@ -1,0 +1,9 @@
+# 核心功能零依赖：WebSocket 客户端是手写的，看板用标准库 http.server。
+# 下面都是可选增强，缺了照样能跑，只是对应功能降级。
+
+# 球杆识别：读 TPS 本地 SQL Server LocalDB，缺了球杆显示"未识别"
+pyodbc>=5.0
+
+# Normalize 开关识别：UI Automation 定位按钮 + 截图取色，缺了徽章显示"未识别"
+uiautomation>=2.0
+Pillow>=10.0

@@ -1,0 +1,30 @@
+# ---- 密钥与本地配置 ----
+ai_config.json
+*.key
+.env
+
+# ---- 运行时数据（每打一杆就变，不该进仓库）----
+dashboard_shots.jsonl
+*.log
+
+# ---- 逆向分析与调试产物（体积大、可重新生成）----
+.rea/
+.rea/*
+cr/
+cr2/
+shot*.png
+
+# ---- 工作区记忆 / 本地缓存 ----
+.workbuddy/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

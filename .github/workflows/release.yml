@@ -1,0 +1,123 @@
+name: Auto Release
+
+# 每次推送到 main：先做基本检查，再按提交信息自动决定版本号、打 tag、发 Release。
+# 版本号唯一真相是仓库根目录的 VERSION 文件，由本工作流回写。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_bump:
+        description: "强制递增类型（留空 = 按提交信息自动判断）"
+        type: choice
+        options: ["", "major", "minor", "patch"]
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: 语法与配置检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 编译所有 Python 文件
+        run: |
+          python -m compileall -q analysis.py trackman_dashboard.py trackman_live.py \
+            tps_club.py tps_norm.py version.py .github/scripts/bump_version.py
+
+      - name: 校验示例配置是合法 JSON
+        run: python -m json.tool ai_config.example.json > /dev/null
+
+      - name: 确认 VERSION 格式
+        run: python -c "import re,sys; s=open('VERSION').read().strip(); sys.exit(0 if re.fullmatch(r'\d+\.\d+\.\d+', s) else 1)"
+
+  release:
+    name: 自动版本号与发布
+    needs: check
+    runs-on: ubuntu-latest
+    # 回写版本号的提交带 [skip ci]，避免自己触发自己
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      released: ${{ steps.commit.outputs.released }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 计算下一个版本号
+        id: ver
+        env:
+          FORCE: ${{ inputs.force_bump }}
+        run: |
+          if [ -n "$FORCE" ]; then
+            python .github/scripts/bump_version.py --write --github-output --force "$FORCE"
+          else
+            python .github/scripts/bump_version.py --write --github-output
+          fi
+
+      - name: 提交 VERSION 并打 tag
+        id: commit
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore(release): v${{ steps.ver.outputs.version }} [skip ci]"
+          git tag -a "v${{ steps.ver.outputs.version }}" -m "v${{ steps.ver.outputs.version }}"
+          git push origin HEAD:main
+          git push origin "v${{ steps.ver.outputs.version }}"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+      - name: 生成 Release 说明
+        if: steps.commit.outputs.released == 'true'
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "v${{ steps.ver.outputs.version }}^" 2>/dev/null || echo "")
+          {
+            echo "## v${{ steps.ver.outputs.version }}"
+            echo ""
+            echo "递增类型：**${{ steps.ver.outputs.bump }}**"
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "### 变更（自 $PREV）"
+              git log "$PREV..v${{ steps.ver.outputs.version }}" --no-merges --pretty="- %s"
+            else
+              echo "### 首次发布"
+              git log "v${{ steps.ver.outputs.version }}" --no-merges --pretty="- %s" | head -40
+            fi
+          } > RELEASE_NOTES.md
+
+      - name: 创建 GitHub Release
+        if: steps.commit.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md
+
+      - name: 汇总
+        run: |
+          if [ "${{ steps.commit.outputs.released }}" = "true" ]; then
+            echo "### 已发布 v${{ steps.ver.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 本次没有新提交，未发版" >> "$GITHUB_STEP_SUMMARY"
+          fi
