@@ -92,11 +92,11 @@ def describe(club_type, club_name=""):
     if t in CLUB_MAP:
         bench, zh, short = CLUB_MAP[t]
         return {"club": bench, "clubZh": zh,
-                "clubShort": short, "clubRaw": shown or t}
+                "clubShort": short, "clubRaw": shown or t, "club_src": "tps"}
     label = shown or t
     if not label:
         return None
-    return {"club": label, "clubZh": label, "clubShort": label, "clubRaw": label}
+    return {"club": label, "clubZh": label, "clubShort": label, "clubRaw": label, "club_src": "tps"}
 
 
 def _pipe_names():

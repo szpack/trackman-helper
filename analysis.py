@@ -10,14 +10,19 @@ analysis.py — 把一杆 TrackMan 数据变成「发现了什么 / 有什么问
 
 这样即便没配 API key、断网、模型超时，用户也一定能看到有依据的诊断，不会白等。
 
-数值口径：传进来的 m 已经统一成英制（mph / yd / ft / 度 / rpm / 秒）。
+数值口径：m 的速度/距离为英制（mph / yd / ft），角度/旋转为度/rpm；击球点为 mm。
 """
 
+import base64
 import json
+import math
 import os
 import re
+import stat
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -296,12 +301,13 @@ def rule_diagnose(m, club=None):
     if isinstance(ih, (int, float)) or isinstance(io, (int, float)):
         parts = []
         if isinstance(ih, (int, float)):
-            parts.append(f"垂直 {'偏上' if ih > 0.01 else '偏下' if ih < -0.01 else '居中'}（{ih * 39.37:+.2f} in）")
+            parts.append(f"垂直 {'偏上' if ih > 10 else '偏下' if ih < -10 else '居中'}（{ih:+.1f} mm）")
         if isinstance(io, (int, float)):
-            parts.append(f"水平 {'偏趾' if io < -0.005 else '偏跟' if io > 0.005 else '居中'}（{io * 39.37:+.2f} in）")
-        add("good" if (abs(ih or 0) < 0.015 and abs(io or 0) < 0.01) else "warn",
-            "击球点", "击球点" + ("在甜点附近" if (abs(ih or 0) < 0.015 and abs(io or 0) < 0.01) else "偏离甜点"),
-            "；".join(parts) + "。" + ("这是效率能上去的直接原因。" if (abs(ih or 0) < 0.015 and abs(io or 0) < 0.01) else "击球点每偏离甜点 1 个纹路，球速大约掉 2-3 mph。"))
+            parts.append(f"水平 {'偏趾' if io > 5 else '偏跟' if io < -5 else '居中'}（{io:+.1f} mm）")
+        near_center = abs(ih or 0) < 15 and abs(io or 0) < 10
+        add("good" if near_center else "warn",
+            "击球点", "击球点" + ("在甜点附近" if near_center else "偏离甜点"),
+            "；".join(parts) + "。" + ("这是效率能上去的直接原因。" if near_center else "击球点每偏离甜点 1 个纹路，球速大约掉 2-3 mph。"))
 
     return dict(club=club, findings=out, bench=b)
 
@@ -400,6 +406,8 @@ def _payload_for_prompt(m, diag):
         ("最大高度", "height", "ft"), ("滞空", "hang", "s"),
         ("侧向偏移", "side", "yd"), ("曲率", "curve", "yd"),
         ("落地角", "landing", "°"),
+        ("击球点高度（正上负下）", "impactHeight", "mm"),
+        ("击球点水平偏移（正趾负跟）", "impactOffset", "mm"),
     ]
     lines = []
     for label, k, unit in keys:
@@ -420,7 +428,23 @@ def build_prompt(m, diag):
          f"后旋 {bench['spin'][0]}~{bench['spin'][1]} rpm，"
          f"攻击角 {bench['attack'][0]}~{bench['attack'][1]}°，"
          f"动态杆面角 {bench['loft'][0]}~{bench['loft'][1]}°")
-    return f"""球杆：{diag['club']}（球杆由球速推断，如果明显不合理请指出）
+    guessed = diag.get("club_guessed", resolve_club(m)[1])
+    source = diag.get("club_source") or ("guess" if guessed else m.get("club_src") or "payload")
+    source_text = {"manual": "用户手动指定", "tps": "TPS 记录",
+                   "payload": "击球数据自带", "guess": "球速推测（未确认）"}.get(source, "击球数据自带")
+    if guessed:
+        club_info = (f"实际球杆：未确认\n推测球杆：{club_zh(diag['club'])}\n"
+                     "球杆尚未确认，以下基准仅供参考；不要把推测当作实际球杆。")
+    else:
+        label = (diag.get("club_label") if source == "manual" else
+                 m.get("clubZh") or m.get("clubRaw") or m.get("club") or diag.get("club_label"))
+        club_info = f"实际球杆：{label or club_zh(diag['club'])}"
+        if source == "tps" and m.get("clubRaw") and m["clubRaw"] != label:
+            club_info += f"\nTPS 原始球杆名称：{m['clubRaw']}"
+        club_info += "\n不要仅凭球速改判已提供的球杆；分析基准是参考分类，不等于实际倾角或型号完全相同。"
+    return f"""{club_info}
+球杆来源：{source_text}
+分析基准：{diag['club']}（{club_zh(diag['club'])}）
 
 实测数据：
 {_payload_for_prompt(m, diag)}
@@ -434,17 +458,29 @@ def build_prompt(m, diag):
 请输出这一杆的分析 JSON。"""
 
 
+def _enabled(value):
+    return value is True or (isinstance(value, str) and value.strip().lower() in ("true", "1", "yes", "on"))
+
+
 def load_config():
     cfg = {
         "base_url": os.environ.get("TM_AI_BASE_URL", ""),
         "api_key": os.environ.get("TM_AI_API_KEY", ""),
         "model": os.environ.get("TM_AI_MODEL", ""),
+        "vision_base_url": os.environ.get("TM_VISION_BASE_URL", ""),
+        "vision_model": os.environ.get("TM_VISION_MODEL", ""),
+        "vision_api_key": os.environ.get("TM_VISION_API_KEY", ""),
+        "vision_enabled": _enabled(os.environ.get("TM_VISION_ENABLED", "")),
+        "include_photos": _enabled(os.environ.get("TM_AI_INCLUDE_PHOTOS", "")),
     }
     if CONFIG_FILE.exists():
         try:
             d = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             for k in cfg:
-                if d.get(k):
+                if k in ("vision_enabled", "include_photos"):
+                    if k in d:
+                        cfg[k] = _enabled(d[k])
+                elif d.get(k):
                     cfg[k] = d[k]
         except Exception:
             pass
@@ -458,7 +494,11 @@ def load_config():
 
 
 def save_config(cfg):
-    keep = {k: cfg.get(k, "") for k in ("base_url", "api_key", "model")}
+    # 旧界面只提交文本字段；视觉设置单独保存时也不能清掉文本配置。
+    keep = load_config()
+    for k in keep:
+        if k in cfg:
+            keep[k] = _enabled(cfg[k]) if k in ("vision_enabled", "include_photos") else cfg[k]
     CONFIG_FILE.write_text(json.dumps(keep, ensure_ascii=False, indent=2), encoding="utf-8")
     return keep
 
@@ -507,19 +547,213 @@ def _explain_http(code, detail):
     return f"接口返回 {code}：{detail}"
 
 
-def llm_analyze(m, diag, cfg=None, timeout=60):
-    cfg = cfg or load_config()
-    if not cfg.get("api_key"):
+MAX_VISION_IMAGE_BYTES = 16 * 1024 * 1024  # 八张 JPEG 原始字节总量，不含 base64。
+
+VISION_PROMPT = """
+你还会收到同一杆的八张二维 JPEG，编号和阶段严格按 manifest 顺序对应。
+阶段、触球标记和校准置信度是输入元数据，不代表照片已经证明这些阶段。
+校准 confidence=1 可能表示人工确认来源，不是算法准确率。
+触球未经人工确认时只能称为候选，禁止断言精确触球帧或精确触球瞬间。
+即使人工确认，也不能从稀疏二维照片计算精确触球时间或精确 3D 关节角。
+不得仅凭照片推导精确速度、距离、旋转、角度、击球点或其他测量数据，不得覆盖雷达数值。
+summary/highlights/issues/drills 仅按雷达数据和规则组织；视觉结论独立写入 visual_findings。
+visual_findings 为数组，每项含 title、detail、evidence_frames（非空整数数组，范围 1..8）、
+confidence（0..1 数值）。只描述可见的定性迹象，说明不确定性；看不清就返回空数组，不编造。
+"""
+
+
+def _vision_ready(cfg):
+    return cfg.get("vision_enabled") is True and all(
+        isinstance(cfg.get(k), str) and cfg[k].strip()
+        for k in ("vision_base_url", "vision_model", "vision_api_key")
+    )
+
+
+def _video_revision(video):
+    revision = video.get("revision") if isinstance(video, dict) else None
+    if isinstance(revision, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", revision):
+        return revision
+    return None
+
+
+def _guid(value):
+    if not isinstance(value, str):
+        raise ValueError("视频杆 ID 缺失或不是 GUID")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        raise ValueError("视频杆 ID 不是合法 GUID") from None
+    if parsed.int == 0:
+        raise ValueError("视频杆 ID 不能是空 GUID")
+    return parsed
+
+
+def _checked_frame_path(revision, filename):
+    root = HERE / "video_frames"
+    directory = root / revision
+    path = directory / filename
+    for component in (root, directory, path):
+        info = component.lstat()
+        if (component.is_symlink() or
+                getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+            raise ValueError("图片路径不能使用符号链接或重解析点")
+    if not root.is_dir() or not directory.is_dir() or not path.is_file():
+        raise ValueError("图片路径不是本地普通文件")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_relative_to(root.resolve(strict=True)) or resolved.parent != directory.resolve(strict=True):
+        raise ValueError("图片路径超出当前 revision")
+    return path
+
+
+def _vision_content(m, diag, video):
+    if not isinstance(video, dict) or not isinstance(video.get("clip"), dict):
+        raise ValueError("视频 manifest 缺少 clip")
+    mid = _guid(video["clip"].get("measurement_id"))
+    if mid != _guid(video.get("expected_measurement_id")):
+        raise ValueError("视频与当前真实杆 ID 不一致")
+    for context in (m, video, video["clip"]):
+        for key in ("measurement_id", "measurementId"):
+            if key in context and _guid(context[key]) != mid:
+                raise ValueError("视频 manifest 与实测杆 ID 不一致")
+    revision = _video_revision(video)
+    if revision is None:
+        raise ValueError("视频 revision 不是安全目录名")
+    frames = video.get("frames8")
+    if not isinstance(frames, list) or len(frames) != 8:
+        raise ValueError("视频 manifest 必须有且仅有八张图片")
+    calibration = video.get("calibration") or {}
+    if not isinstance(calibration, dict):
+        raise ValueError("视频校准元数据格式错误")
+    confirmed = (calibration.get("impact_manually_confirmed") is True or
+                 video.get("impact_manually_confirmed") is True or
+                 calibration.get("status") == "manual_confirmed")
+    paths, stages, names = [], [], set()
+    total = 0
+    for index, frame in enumerate(frames, 1):
+        if not isinstance(frame, dict):
+            raise ValueError("视频帧元数据格式错误")
+        for key in ("measurement_id", "measurementId"):
+            if key in frame and _guid(frame[key]) != mid:
+                raise ValueError("图片与当前真实杆 ID 不一致")
+        if "revision" in frame and frame["revision"] != revision:
+            raise ValueError("图片 revision 与 manifest 不一致")
+        filename = frame.get("file")
+        if (not isinstance(filename, str) or
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.(?:jpg|jpeg)", filename, re.I) or
+                filename.casefold() in names):
+            raise ValueError("图片必须为当前 revision 下八个不同的 JPEG 文件名")
+        names.add(filename.casefold())
+        path = _checked_frame_path(revision, filename)
+        size = path.stat().st_size
+        total += size
+        if total > MAX_VISION_IMAGE_BYTES:
+            raise ValueError("八张 JPEG 总量超过 16 MiB 上限")
+        paths.append((path, filename))
+        stages.append({
+            "frame": index,
+            "stage": frame.get("stage") or frame.get("phase") or frame.get("label") or "阶段未确认",
+            "status": frame.get("stage_status") or frame.get("status") or "未确认",
+            "confidence": frame.get("stage_confidence", frame.get("confidence", "未提供")),
+        })
+    metadata = {
+        "measurement_id": str(mid), "revision": revision,
+        "status": video.get("status") or video.get("impact_alignment_status") or "未提供",
+        "stages": stages,
+        "calibration": {k: calibration[k] for k in ("status", "confidence", "impact_confidence") if k in calibration},
+        "impact_manually_confirmed": confirmed,
+        "impact_note": "人工确认标记，仍不支持精确三维测量" if confirmed else "触球候选，未经人工确认，禁止断言精确触球",
+    }
+    content = [{"type": "text", "text": build_prompt(m, diag) +
+                "\n同杆归一化实测 m（击球点 mm，禁止覆盖）：\n" + json.dumps(m, ensure_ascii=False) +
+                "\n同杆视频阶段/校准元数据：\n" + json.dumps(metadata, ensure_ascii=False)}]
+    total = 0
+    for path, filename in paths:
+        # 开启前后复查，拒绝读取期间被替换的链接/文件；只进行有上限的读取。
+        _checked_frame_path(revision, filename)
+        before = path.lstat()
+        with path.open("rb") as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("图片读取时发生替换")
+            image = source.read(MAX_VISION_IMAGE_BYTES - total + 1)
+        _checked_frame_path(revision, filename)
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise ValueError("图片读取时发生变化")
+        total += len(image)
+        if total > MAX_VISION_IMAGE_BYTES:
+            raise ValueError("八张 JPEG 总量超过 16 MiB 上限")
+        if not image.startswith(b"\xff\xd8\xff") or not image.endswith(b"\xff\xd9"):
+            raise ValueError("图片内容不是 JPEG")
+        content.append({"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")}})
+    return content, confirmed
+
+
+def _visual_findings(data, confirmed):
+    findings = []
+    raw = data.get("visual_findings")
+    if not isinstance(raw, list):
+        return findings
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title, detail = item.get("title"), item.get("detail")
+        frames, confidence = item.get("evidence_frames"), item.get("confidence")
+        if (not isinstance(title, str) or not title.strip() or not isinstance(detail, str) or not detail.strip() or
+                not isinstance(frames, list) or not frames or
+                any(type(n) is not int or not 1 <= n <= 8 for n in frames) or
+                type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+            continue
+        text = title + detail
+        if re.search(r"\d\s*(?:°|度|rpm\b|mph\b|mm\b|yd\b|ft\b|m/s\b)", text, re.I):
+            continue
+        if not confirmed and re.search(r"(?:精确|确切|准确)(?:的)?(?:触球|接触)|触球瞬间", text):
+            continue
+        findings.append(dict(title=title.strip()[:40], detail=detail.strip(),
+                             evidence_frames=list(dict.fromkeys(frames)), confidence=confidence))
+    return findings[:8]
+
+
+def _safe_error(error, cfg):
+    text = str(error)
+    secrets = [cfg.get(k) for k in ("api_key", "vision_api_key")]
+    for secret in sorted((s for s in secrets if isinstance(s, str) and s), key=len, reverse=True):
+        text = text.replace(secret, "[已隐藏]")
+    return text
+
+
+def llm_analyze(m, diag, cfg=None, timeout=60, video=None, photos_allowed=None):
+    cfg = cfg if cfg is not None else load_config()
+    vision = video is not None and _vision_ready(cfg)
+    opted_out = vision and photos_allowed is not None and not photos_allowed()
+    vision = vision and not opted_out
+    confirmed = False
+    if vision:
+        parsed = urllib.parse.urlsplit(cfg["vision_base_url"].strip())
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname or
+                parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError("视觉接口地址必须是无凭据和查询参数的 HTTP(S) base URL")
+        content, confirmed = _vision_content(m, diag, video)
+        # 八图读取也可能耗时；发送模型请求前再次检查全局撤销许可。
+        if photos_allowed is not None and not photos_allowed():
+            vision, opted_out = False, True
+    if not vision:
+        content = build_prompt(m, diag)
+    prefix = "vision_" if vision else ""
+    if not cfg.get(prefix + "api_key"):
         raise RuntimeError("未配置 API Key")
-    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    base_url = cfg[prefix + "base_url"].strip()
+    url = base_url.rstrip("/") + "/chat/completions"
+    model = cfg[prefix + "model"].strip()
     body = {
-        "model": cfg["model"],
+        "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_prompt(m, diag)},
+            {"role": "system", "content": SYSTEM_PROMPT + (VISION_PROMPT if vision else "")},
+            {"role": "user", "content": content},
         ],
         "temperature": 0.4,
-        "max_tokens": 1400,
+        "max_tokens": 2000 if vision else 1400,
     }
     if _is_deepseek(url):
         # DeepSeek V4 默认开思考模式（effort=high），一杆分析要多等十几秒、
@@ -527,23 +761,31 @@ def llm_analyze(m, diag, cfg=None, timeout=60):
         body["thinking"] = {"type": "disabled"}
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {cfg['api_key']}",
+        "Authorization": f"Bearer {cfg[prefix + 'api_key']}",
     }
     try:
         resp = _post_json(url, {**body, "response_format": {"type": "json_object"}}, headers, timeout)
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "ignore")[:300]
-        # 一些兼容服务不支持 response_format / thinking，去掉再试一次
+        if vision:
+            # 图片请求绝不因兼容性错误再付费重试，也不回显服务端正文。
+            raise RuntimeError(f"视觉接口返回 HTTP {e.code}（未重试）") from None
+        detail = _safe_error(e.read().decode("utf-8", "ignore"), cfg)[:300]
+        # 普通文本保留既有兼容流程。
         if e.code in (400, 422):
             retry = {k: v for k, v in body.items() if k != "thinking"}
             try:
                 resp = _post_json(url, retry, headers, timeout)
             except urllib.error.HTTPError:
                 raise RuntimeError(_explain_http(e.code, detail)) from None
+            except Exception as retry_error:
+                raise RuntimeError(_safe_error(retry_error, cfg)) from None
         else:
             raise RuntimeError(_explain_http(e.code, detail)) from None
     except urllib.error.URLError as e:
-        raise RuntimeError(f"连不上接口：{e.reason}") from None
+        raise RuntimeError("视觉接口连接失败（未重试）" if vision else
+                           f"连不上接口：{_safe_error(e.reason, cfg)}") from None
+    except Exception as e:
+        raise RuntimeError("视觉请求失败（未重试）" if vision else _safe_error(e, cfg)) from None
 
     text = resp["choices"][0]["message"]["content"]
     data = _extract_json(text)
@@ -561,10 +803,18 @@ def llm_analyze(m, diag, cfg=None, timeout=60):
                      how=str(d.get("how", "")))
                 for d in (data.get("drills") or [])][:2],
         source="ai",
-        model=cfg.get("model", ""),
+        model=model,
+        input_mode="vision" if vision else "text",
+        image_count=8 if vision else 0,
+        video_revision=_video_revision(video),
+        visual_findings=_visual_findings(data, confirmed) if vision else [],
     )
     if not out["summary"]:
         raise ValueError("模型返回内容为空")
+    out["notice"] = ("图片未参与：照片开关关闭" if opted_out else
+                     "触球未经人工确认，图片仅作候选；不支持精确触球或 3D 关节角" if vision and not confirmed else
+                     "图片未参与：视觉能力未启用" if video is not None and cfg.get("vision_enabled") is not True else
+                     "图片未参与：视觉配置缺失" if video is not None and not vision else "")
     return out
 
 
@@ -580,8 +830,13 @@ def club_label(m, resolved, override=None):
     return raw or club_zh(resolved)
 
 
-def analyze(m, club=None, use_ai=True, cfg=None):
-    """主入口：先规则诊断，再尝试大模型；任何异常都降级成规则结论。"""
+def analyze(m, club=None, use_ai=True, cfg=None, video=None, photos_allowed=None):
+    """先规则诊断，再尝试文本或八图片模型；失败不追加付费请求。
+
+    video 是内部可信 manifest，expected_measurement_id 必须由后端填入当前真实杆 GUID。
+    frames8 的顺序就是图片证据编号 1..8；文件仅从 video_frames/<revision>/ 读取。
+    人工确认来自 calibration.impact_manually_confirmed=True 或 status=manual_confirmed。
+    """
     resolved, guessed = resolve_club(m, club)
     diag = rule_diagnose(m, resolved)
     result = _rule_result(diag, m)
@@ -589,23 +844,29 @@ def analyze(m, club=None, use_ai=True, cfg=None):
     result["club_zh"] = club_zh(diag["club"])
     result["club_label"] = club_label(m, diag["club"], club)
     result["club_guessed"] = guessed
+    source = "manual" if club in BENCH else "guess" if guessed else m.get("club_src") or "payload"
+    result["club_source"] = source
+    diag.update(club_label=result["club_label"], club_guessed=guessed, club_source=source)
+    result.update(input_mode="rules", image_count=0, video_revision=_video_revision(video),
+                  visual_findings=[], model="")
+    image_notice = "；图片未参与" if video is not None else ""
     if not use_ai:
-        result["notice"] = "未启用 AI，以下为规则诊断"
+        result["notice"] = "未启用 AI，以下为规则诊断" + image_notice
         return result
-    cfg = cfg or load_config()
-    if not cfg.get("api_key"):
-        result["notice"] = "未配置 AI Key，以下为规则诊断（在设置里填入 Key 即可启用 AI）"
+    cfg = cfg if cfg is not None else load_config()
+    if not cfg.get("api_key") and not (video is not None and _vision_ready(cfg)):
+        result["notice"] = "未配置 AI Key，以下为规则诊断（在设置里填入 Key 即可启用 AI）" + image_notice
         return result
     try:
-        ai = llm_analyze(m, diag, cfg)
+        ai = llm_analyze(m, diag, cfg, video=video, photos_allowed=photos_allowed)
         ai["club"] = diag["club"]
         ai["club_zh"] = club_zh(diag["club"])
         ai["club_label"] = result["club_label"]
         ai["club_guessed"] = guessed
-        ai["notice"] = ""
+        ai["club_source"] = source
         return ai
     except Exception as e:
-        result["notice"] = f"AI 调用失败（{e}），已降级为规则诊断"
+        result["notice"] = f"AI 调用失败（{_safe_error(e, cfg)}），已降级为规则诊断" + image_notice
         return result
 
 

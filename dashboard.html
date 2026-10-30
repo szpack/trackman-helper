@@ -197,8 +197,12 @@
     content:'';position:absolute;inset:0 auto 0 0;width:3px;
     background:linear-gradient(180deg,var(--blue),var(--violet));
   }
-  .aiTools{margin-left:auto;display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0}
+  .aiTools{margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap;text-transform:none;letter-spacing:0}
   .aiTools select,.aiTools button{font-size:11px;padding:4px 8px}
+  .aiTools label{display:flex;gap:5px;align-items:center;font-size:11px;font-weight:400;color:var(--muted);cursor:pointer}
+  .aiTools .photoModeLabel{padding:5px 9px;border-radius:6px;border:1px solid var(--line);transition:background .15s,color .15s}
+  .aiTools .photoModeLabel.isOn{background:#bd8c00;border-color:#e5b626;color:#fff;font-weight:600}
+  .aiTools .photoModeLabel input{accent-color:#fff}
 
   .aiSummary{
     font-size:24px;line-height:1.62;font-weight:600;letter-spacing:-.2px;color:#fff;
@@ -269,6 +273,38 @@
   }
   .aiWait small{display:block;color:#9fb0c4;font-size:14px;margin-top:4px}
 
+  /* ---------- 八张同杆照片 ---------- */
+  .aiPhotos{margin-bottom:16px;min-width:0}
+  .photoHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  .photoHead strong{font-size:15px}
+  .photoHead .photoActions{margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .photoCamera{max-width:240px;min-width:130px;font-size:12px}
+  .photoNote{font-size:12px;color:#9fb0c4;line-height:1.6;margin:6px 0}
+  .photoScroll{overflow-x:auto;padding-bottom:5px}
+  .photoGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+  .photoTile{display:flex;flex-direction:column;padding:0;min-width:0;overflow:hidden;text-align:left;border-radius:10px}
+  .photoImage{height:230px;width:100%;display:flex;align-items:center;justify-content:center;background:#080d14}
+  .photoImage img{width:100%;height:100%;object-fit:contain}
+  .photoMissing{padding:14px;text-align:center;color:var(--muted);font-size:12px}
+  .photoMissing[hidden],.photoImage img[hidden]{display:none}
+  button:disabled{cursor:default;opacity:.65}
+  .visualEvidence{margin:0 0 14px;border:1px solid #2e4059;border-radius:12px;padding:16px 22px;background:rgba(88,166,255,.055)}
+  .visualEvidence h3{font-size:18px;color:#79c0ff;margin-bottom:8px}
+  .visualEvidence p{font-size:16px;line-height:1.7}
+  .modal .box.photoBox{width:min(960px,94vw);max-height:94vh;overflow:auto}
+  .largePhoto{height:min(62vh,620px);display:flex;align-items:center;justify-content:center;background:#080d14;border-radius:8px;margin-top:10px}
+  .largePhoto img{width:100%;height:100%;object-fit:contain}
+  .calCandidates{display:flex;gap:8px;overflow-x:auto;margin:10px 0;padding-bottom:5px}
+  .calCandidates button{padding:5px;min-width:120px;flex:none}
+  .calCandidates img{display:block;width:116px;height:94px;object-fit:contain;background:#080d14}
+  .calCandidates small{display:block;font:11px/1.6 var(--mono)}
+  .calNav{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .modal .box{max-height:94vh;overflow:auto}
+  .cfgSection{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+  .modal .checkLabel{display:flex;align-items:center;gap:8px;color:var(--text);margin:10px 0}
+  .modal input[type="checkbox"]{width:auto}
+  .modal .privacyNote{font-size:12px;color:#c2d2e4;line-height:1.7;margin-top:8px}
+
   /* ---------- 设置弹窗 ---------- */
   .modal{position:fixed;inset:0;background:rgba(4,7,11,.74);z-index:60;
     display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
@@ -307,6 +343,10 @@
   }
   @media (max-width:820px){
     .hero{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .photoGrid{min-width:760px}
+    .photoImage{height:210px}
+    .aicard h2{flex-wrap:wrap}
+    .aiTools{flex-wrap:wrap}
   }
 </style>
 </head>
@@ -365,11 +405,14 @@
     <h2>AI 教练分析
       <em id="aiHint">每杆算完自动分析</em>
       <div class="aiTools">
-        <select id="aiClub" title="默认自动：以 TPS 里选的球杆为准；手动改只影响当前这一杆"></select>
-        <button id="aiRedo" title="用当前球杆重新分析这一杆">重新分析</button>
+        <select id="aiClub" title="默认自动：以 TPS 里选的球杆为准；手动改只影响当前这一杆，重分析沿用全局照片开关"></select>
+        <label id="aiPhotoModeLabel" class="photoModeLabel" for="aiIncludePhotos"><input id="aiIncludePhotos" type="checkbox" aria-describedby="aiPhotoConsent">分析包含照片（全局）</label>
+        <button id="aiRedo" title="重新分析当前杆，是否包含照片沿用全局设置">重新分析</button>
         <button id="aiCfgBtn" title="配置大模型">AI 设置</button>
       </div>
     </h2>
+    <p id="aiPhotoConsent" class="photoNote" role="status">全局开关保存后对后续挥杆生效；已有分析不会自动重跑。</p>
+    <div id="aiPhotos" class="aiPhotos" aria-label="当前杆的八张挥杆照片"></div>
     <div id="aiBody"></div>
   </section>
 
@@ -394,21 +437,61 @@
 
 <!-- AI 设置弹窗 -->
 <div class="modal" id="aiModal" hidden>
-  <div class="box">
-    <h3>AI 设置</h3>
-    <p class="sub2">填任意 OpenAI 兼容接口即可（DeepSeek、Kimi、通义、OpenAI、本地 Ollama 都行）。
-      Key 只存在本机 <code>ai_config.json</code>，不会上传到任何第三方。</p>
-    <label>接口地址</label>
+  <div class="box" role="dialog" aria-modal="true" aria-labelledby="aiSettingsTitle">
+    <h3 id="aiSettingsTitle">AI 设置</h3>
+    <p class="sub2">编辑时不会因点击背景或按 Esc 关闭；填写完成后请点“保存”，放弃修改请点“取消”。</p>
+    <p class="privacyNote">全局“分析包含照片”开启，且视觉能力启用、配置就绪时，后续挥杆会自动将照片及击球参数发送至视觉接口；关闭时只分析参数。Key 保存在本机配置中，请求鉴权时会发送给对应服务商。请仅配置你信任的接口。</p>
+    <div class="cfgSection"><h3>文本模型</h3></div>
+    <label for="cfgUrl">文本接口地址</label>
     <input id="cfgUrl" placeholder="https://api.deepseek.com/v1">
     <label>模型名</label>
     <input id="cfgModel" placeholder="deepseek-flash">
     <label>API Key</label>
-    <input id="cfgKey" type="password" placeholder="sk-…（留空表示不修改）">
+    <input id="cfgKey" type="password" placeholder="sk-…（留空表示不修改）" autocomplete="new-password">
+    <div class="cfgSection">
+      <h3>视觉模型（独立配置）</h3>
+      <label class="checkLabel" for="cfgVisionEnabled"><input id="cfgVisionEnabled" type="checkbox">启用服务商视觉能力（与全局照片开关独立）</label>
+      <p class="privacyNote">需要支持图片的 OpenAI 兼容模型。未启用或未配置时，照片仍展示，分析仅使用参数并说明原因。是否自动发送照片由全局“分析包含照片”决定；保存设置后的当前杆重分析也沿用全局开关。</p>
+      <label for="cfgVisionUrl">视觉接口地址</label>
+      <input id="cfgVisionUrl" placeholder="支持图片的 OpenAI 兼容接口地址">
+      <label for="cfgVisionModel">视觉模型名</label>
+      <input id="cfgVisionModel" placeholder="支持图片输入的模型名">
+      <label for="cfgVisionKey">视觉 API Key</label>
+      <input id="cfgVisionKey" type="password" placeholder="留空保留已保存的视觉 Key" autocomplete="new-password">
+      <p class="photoNote" id="cfgVisionStatus"></p>
+    </div>
     <div class="row">
       <span class="testMsg" id="cfgMsg"></span>
-      <button id="cfgTest">测试</button>
+      <button id="cfgTest" title="保存配置并请求文本接口，不测试视觉接口">测试文本接口</button>
       <button id="cfgCancel">取消</button>
       <button id="cfgSave" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 照片放大与触球帧人工校准 -->
+<div class="modal" id="photoModal" hidden>
+  <div class="box photoBox" role="dialog" aria-modal="true" aria-labelledby="photoTitle">
+    <h3 id="photoTitle"></h3>
+    <div id="photoPreview" class="largePhoto"></div>
+    <p id="photoDetail" class="photoNote"></p>
+    <div class="row"><button id="photoClose">关闭</button></div>
+  </div>
+</div>
+<div class="modal" id="calModal" hidden>
+  <div class="box photoBox" role="dialog" aria-modal="true" aria-labelledby="calTitle">
+    <h3 id="calTitle">人工确认触球帧</h3>
+    <p class="privacyNote">启发式定位仅为候选，只有人工确认后才标记为已校准。选择候选或左右逐帧检查；确认后后端重跑八阶段并重新分析，是否发送照片沿用全局“分析包含照片”开关。</p>
+    <p id="calStatus" class="photoNote"></p>
+    <div id="calCandidates" class="calCandidates"></div>
+    <div id="calPreview" class="largePhoto"></div>
+    <div class="calNav">
+      <button id="calPrev">上一帧</button><button id="calNext">下一帧</button>
+      <span id="calFrame" class="photoNote"></span>
+    </div>
+    <div class="row">
+      <span id="calMsg" class="testMsg" role="status"></span>
+      <button id="calClose">取消</button><button id="calConfirm" class="primary" disabled>确认此帧并重新分析</button>
     </div>
   </div>
 </div>
@@ -593,7 +676,7 @@ const NORM_TEXT = {
 };
 function normKey(){
   if (!normState || normState.on === null || normState.on === undefined) return 'unknown';
-  if (normState.conf === 'low') return 'soft';       // layout 推测，不能当实测
+  if (normState.conf === 'low' || normState.stale === true) return 'soft'; // layout 推测或状态陈旧，不能当实测
   return normState.on ? 'on' : 'off';
 }
 /* ---- 版本号：dev 后缀说明跑的不是发版代码 ---- */
@@ -841,18 +924,437 @@ function fillAiClubs(){
     `<option value="${esc(c.key)}">${esc(c.zh)}</option>`).join('');
 }
 
-/* 球杆手动指定只对当前这一杆有效，换杆 / 换分析对象都回到"自动" */
+/* 手动球杆只对当前杆有效；照片全局开关不会随切杆清除。 */
 function resetClubPick(){
   clubOverride = '';
   const sel = $('aiClub');
   if (sel) sel.value = '';
+  paintPhotoConsent();
+}
+
+let photoModeSaving = false;
+let photoModeError = '';
+
+function acceptAiConfig(data){
+  aiInfo = { ...aiInfo, ...data };
+  if (!photoModeSaving) $('aiIncludePhotos').checked = aiInfo.include_photos === true;
+  paintPhotoConsent();
+}
+
+function paintPhotoConsent(){
+  const enabled = $('aiIncludePhotos').checked;
+  const label = $('aiPhotoModeLabel');
+  if (enabled) label.classList.add('isOn'); else label.classList.remove('isOn');
+  $('aiIncludePhotos').disabled = photoModeSaving;
+  $('aiRedo').disabled = photoModeSaving;
+  $('aiPhotoConsent').textContent = photoModeSaving ? '正在保存全局照片开关…' : photoModeError ||
+    (enabled ? '全局照片分析已开启：后续挥杆自动带照片，切杆不清除；已有结果不自动重跑，需要时点击“重新分析”。' :
+      '全局照片分析已关闭：后续挥杆仅分析参数；已有照片分析结果仍保留。') +
+    (enabled && (!aiInfo.vision_enabled || !aiInfo.vision_configured) ? ' 视觉能力未启用或未配置就绪，请到 AI 设置配置。' : '');
+}
+
+async function savePhotoMode(){
+  if (photoModeSaving) return;
+  const enabled = $('aiIncludePhotos').checked;
+  photoModeSaving = true;
+  photoModeError = '';
+  paintPhotoConsent();
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch('/api/ai-photo-mode', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+      body: JSON.stringify({ include_photos: enabled }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (data.ok !== true || typeof data.include_photos !== 'boolean') throw new Error('服务器未确认保存，请重启看板后重试');
+    acceptAiConfig(data);
+  } catch (error){
+    // 超时可能已保存：重新读无 Key 的能力状态，以服务器为准，不能假装已开启。
+    try {
+      const response = await fetch('/api/ai');
+      if (response.ok) acceptAiConfig(await response.json());
+    } catch {}
+    photoModeError = `照片开关保存未确认：${error.name === 'AbortError' ? '请求超时' : error.message}。请检查或重启看板后重试。`;
+  } finally {
+    clearTimeout(timeout);
+    photoModeSaving = false;
+    $('aiIncludePhotos').checked = aiInfo.include_photos === true;
+    paintPhotoConsent();
+  }
+}
+
+function analysisInputLabel(result){
+  if (!result) return '尚无本次分析结果；默认仅文本分析，照片仍可查看';
+  if (result.input_mode === 'vision') return `input_mode=vision · 本次视觉分析 · ${result.image_count || 8} 张照片（图片已参与）`;
+  if (['text', 'rules'].includes(result.input_mode)) return `input_mode=${result.input_mode} · 这份结果仅分析参数，图片未参与` +
+    ($('aiIncludePhotos').checked && result.photos_requested !== true ? '；这是未带图的已有结果，可点击“重新分析”更新' : '');
+  return `input_mode=${result.input_mode || '未返回'} · 图片是否参与未确认`;
+}
+
+/* ============ 照片：按 seq 缓存，轮询与 SSE 不抢历史选择 ============ */
+const videos = Object.create(null);
+const VIDEO_POLL_LIMIT = 20;
+let photoSeq = null;
+let calibrationView = null;
+let cameraPreference = localStorage.getItem('tm-camera') || '';
+
+function videoEntry(seq){
+  return videos[seq] || (videos[seq] = {
+    data: null, cameraId: null, cameraManual: false, cameras: [], attempts: 0,
+    timer: null, controller: null, token: 0, stopped: false, note: '',
+  });
+}
+
+function changeCamera(seq, cameraId, remember = true){
+  if (seq !== aiSeq || !shotBySeq(seq)) return;
+  const entry = videoEntry(seq);
+  const camera = entry.cameras.find(c => c.id === cameraId && c.available !== false);
+  if (!camera || entry.cameraId === cameraId) return;
+  stopVideoPoll(seq);
+  closeCalibration();
+  $('photoClose').onclick();
+  entry.cameraId = cameraId;
+  entry.cameraManual = true;
+  if (remember){
+    cameraPreference = camera.key || '';
+    localStorage.setItem('tm-camera', cameraPreference); // 只存摄像头偏好，不存照片、Key 或单杆 GUID。
+  }
+  entry.data = { seq, status: 'pending', camera_id: cameraId, cameras: entry.cameras, frames: [] };
+  entry.attempts = 0;
+  entry.stopped = false;
+  entry.note = '';
+  const result = analyses[seq];
+  if (result?.photos_requested || result?.video_camera_id || result?.input_mode === 'vision') delete analyses[seq];
+  paintPhotoConsent(); // 换摄像头保留全局开关，不额外触发模型。
+  paintAI();
+  requestVideo(seq);
+}
+
+function stopVideoPoll(seq){
+  const entry = videos[seq];
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  entry.timer = null;
+  if (entry.controller) entry.controller.abort();
+  entry.controller = null;
+  entry.token++;
+}
+
+function scheduleVideoPoll(seq){
+  const entry = videoEntry(seq);
+  if (seq !== aiSeq || entry.timer || entry.controller || entry.stopped) return;
+  if (entry.attempts >= VIDEO_POLL_LIMIT){
+    entry.stopped = true;
+    entry.note = '等待照片超时，已停止自动轮询；可重试准备，或等待后台就绪事件。';
+    paintPhotos(seq);
+    return;
+  }
+  entry.timer = setTimeout(() => {
+    entry.timer = null;
+    requestVideo(seq);
+  }, 1500);
+}
+
+function isVideoData(data){
+  return data && Number.isInteger(data.seq) && data.seq > 0 &&
+    ['pending', 'ready', 'missing', 'error'].includes(data.status);
+}
+
+function acceptVideo(data){
+  if (!isVideoData(data)) return false;
+  const entry = videoEntry(data.seq), old = entry.data;
+  // camera_id 与 seq 一起绑定，另一摄像头的迟到 GET/SSE 不能替换当前八图。
+  if (entry.cameraId && data.camera_id && entry.cameraId !== data.camera_id){
+    if (entry.cameraManual || data.camera_auto !== true) return false;
+    entry.cameraId = data.camera_id; // 自动模式：外接录像后到时随服务器优先级升级。
+  }
+  if (Array.isArray(data.cameras)) entry.cameras = data.cameras;
+  if (!entry.cameraId && data.camera_id){
+    if (data.seq === aiSeq && cameraPreference){
+      const preferred = entry.cameras.find(c => c.key === cameraPreference && c.available !== false);
+      if (preferred && preferred.id !== data.camera_id){
+        changeCamera(data.seq, preferred.id, false);
+        return true;
+      }
+    }
+    entry.cameraId = data.camera_id;
+  }
+  if (old && old.revision != null && data.revision != null &&
+      Number.isFinite(Number(old.revision)) && Number.isFinite(Number(data.revision)) &&
+      Number(data.revision) < Number(old.revision)) return false;
+  stopVideoPoll(data.seq); // SSE 先到时，让同杆的旧 GET 响应失效。
+  entry.data = data;
+  entry.note = '';
+  if (data.status === 'pending' && old && old.status !== 'pending'){
+    entry.attempts = 0;
+    entry.stopped = false;
+  }
+  if (data.seq === aiSeq && old && (data.status !== 'ready' || String(old.revision) !== String(data.revision))){
+    $('photoClose').onclick();
+  }
+  if (old && old.status === 'ready' && (data.status === 'pending' ||
+      String(old.revision) !== String(data.revision))){
+    if (data.status === 'pending' || analyses[data.seq]?.video_revision == null ||
+        String(analyses[data.seq].video_revision) !== String(data.revision)) delete analyses[data.seq];
+  }
+  const view = calibrationView;
+  if (view && view.seq === data.seq && (data.status !== 'ready' ||
+      String(data.revision) !== String(view.revision))){
+    closeCalibration();
+  }
+  if (data.status !== 'pending') entry.stopped = false;
+  if (data.seq === aiSeq){
+    paintAI();
+    if (data.status === 'pending') scheduleVideoPoll(data.seq);
+  }
+  return true;
+}
+
+async function requestVideo(seq, retry = false){
+  if (seq !== aiSeq || !shotBySeq(seq)) return;
+  const entry = videoEntry(seq);
+  if (entry.controller) return;
+  const controller = new AbortController(), token = ++entry.token;
+  entry.controller = controller;
+  entry.attempts++;
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const camera = entry.cameraManual && entry.cameraId ? { camera_id: entry.cameraId } : {};
+    const query = entry.cameraManual && entry.cameraId ? `&camera_id=${encodeURIComponent(entry.cameraId)}` : '';
+    const response = await fetch(retry ? '/api/video-prepare' : `/api/video?seq=${seq}${query}`, {
+      ...(retry ? { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seq, ...camera }) } : {}),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (entry.token !== token) return;
+    if (isVideoData(data) && data.seq !== seq) throw new Error('照片响应杆号不匹配');
+    entry.controller = null;
+    if (!acceptVideo(data)){
+      if (!retry && !isVideoData(data)) throw new Error('照片响应格式不正确');
+      scheduleVideoPoll(seq);
+    }
+  } catch (error){
+    if (entry.token !== token) return;
+    entry.controller = null;
+    entry.stopped = true;
+    entry.note = error.name === 'AbortError' ? '照片请求超时，可重试准备。' : `照片请求失败：${error.message}`;
+    entry.data = { ...(entry.data || {}), seq, status: 'error', frames: [] };
+    if (seq === aiSeq) paintPhotos(seq);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function ensurePhotos(seq){
+  if (photoSeq !== seq){
+    stopVideoPoll(photoSeq);
+    $('photoModal').hidden = true;
+    $('photoPreview').replaceChildren();
+    closeCalibration();
+    photoSeq = seq;
+  }
+  if (!seq || !shotBySeq(seq)) return;
+  const entry = videoEntry(seq);
+  if (!entry.data && !entry.controller && !entry.stopped) requestVideo(seq);
+  else if (entry.data?.status === 'pending') scheduleVideoPoll(seq);
+}
+
+function photoUrl(value){
+  if (typeof value !== 'string' || !value) return '';
+  try {
+    const url = new URL(value, location.href);
+    return ['http:', 'https:'].includes(url.protocol) && url.origin === location.origin
+      ? url.href : '';
+  } catch { return ''; }
+}
+
+function calibrationLabel(data){
+  const cal = data?.calibration;
+  if (cal?.status === 'manual_confirmed') return '已校准（人工确认触球帧）';
+  if (cal?.status === 'candidate') return '触球帧候选（启发式，尚未人工确认）';
+  return '触球校准不可用 / 尚未确认';
+}
+
+function frameDetail(frame){
+  const parts = [];
+  if (Number.isInteger(frame.frame_index_zero_based)) parts.push(`帧 ${frame.frame_index_zero_based}（从 0 开始）`);
+  if (oknum(frame.actual_container_seconds)) parts.push(`容器时间 ${num(frame.actual_container_seconds, 3)}s`);
+  if (frame.stage_status) parts.push(`阶段状态：${frame.stage_status}`);
+  if (oknum(frame.confidence)) parts.push(`置信度 ${num(frame.confidence * 100, 0)}%`);
+  return parts.join(' · ');
+}
+
+function paintPhotos(seq){
+  if (seq !== aiSeq) return;
+  const entry = videos[seq], data = entry?.data;
+  const frames = data?.status === 'ready' && Array.isArray(data.frames) ? data.frames : [];
+  const status = !seq ? '等待第一杆的照片' :
+    ({ pending: '照片准备中', ready: '照片已就绪', missing: '本杆暂无录像', error: '照片准备失败' }[data?.status] || '正在读取照片');
+  const canCalibrate = data?.status === 'ready' && data.revision != null &&
+    [...(data.calibration?.candidates || []), ...frames].some(f => Number.isInteger(f.frame_index_zero_based) && f.frame_index_zero_based >= 0);
+  const cameras = entry?.cameras || [];
+  $('aiPhotos').innerHTML = `<div class="photoHead">
+      <div class="photoActions">
+        <select class="photoCamera" data-action="camera" aria-label="选择本杆摄像头" ${cameras.length ? '' : 'disabled'}>
+          ${cameras.length ? cameras.map(c => `<option value="${esc(c.id)}" ${entry.cameraId === c.id ? 'selected' : ''} ${c.available === false ? 'disabled' : ''}>${esc(c.label)}</option>`).join('') : '<option value="">暂无摄像头录像</option>'}
+        </select>
+        <button data-action="prepare" ${!seq || entry?.controller || data?.status === 'pending' && !entry?.stopped ? 'disabled' : ''}>重试准备</button>
+        <button data-action="calibrate" ${canCalibrate ? '' : 'disabled'}>校准触球帧</button>
+      </div></div>
+    <div class="photoScroll"><div class="photoGrid">${Array.from({ length: 8 }, (_, i) => {
+      const frame = frames[i], url = photoUrl(frame?.url);
+      return `<button class="photoTile" data-photo="${i}" data-seq="${seq}" ${url ? '' : 'disabled'} aria-label="放大照片 ${i + 1}">
+        <span class="photoImage">${url ? `<img src="${esc(url)}" alt="挥杆照片 ${i + 1}" loading="lazy">` : ''}
+          <span class="photoMissing" ${url ? 'hidden' : ''}>${url ? '照片加载失败' : esc(seq ? (entry?.note || status) : '暂无照片')}</span></span></button>`;
+    }).join('')}</div></div>`;
+}
+
+function closeCalibration(){
+  calibrationView = null;
+  $('calModal').hidden = true;
+  $('calPreview').replaceChildren();
+}
+
+function updateCalibrationControls(){
+  const view = calibrationView;
+  if (!view) return;
+  $('calPrev').disabled = view.loading || view.busy || view.frameIndex <= 0;
+  $('calNext').disabled = view.loading || view.busy;
+  $('calConfirm').disabled = view.loading || view.busy || !view.loaded;
+  $('calFrame').textContent = `第 ${view.seq} 杆 · revision ${view.revision} · 帧 ${view.requestedIndex}（从 0 开始）`;
+}
+
+function previewCalibration(index, candidate = null){
+  const view = calibrationView;
+  if (!view || view.busy || !Number.isInteger(index) || index < 0) return;
+  const token = ++view.previewToken;
+  view.requestedIndex = index;
+  view.loading = true;
+  view.loaded = false;
+  $('calMsg').textContent = '正在读取这一帧…';
+  updateCalibrationControls();
+  const image = document.createElement('img');
+  image.alt = `第 ${view.seq} 杆 · 触球候选帧 ${index}`;
+  image.onload = () => {
+    if (calibrationView !== view || view.previewToken !== token) return;
+    view.frameIndex = index;
+    view.loading = false;
+    view.loaded = true;
+    $('calMsg').textContent = candidate && oknum(candidate.actual_container_seconds)
+      ? `容器时间 ${num(candidate.actual_container_seconds, 3)}s；请人工检查是否触球。`
+      : '请人工检查是否触球；不按帧率猜测容器时间。';
+    updateCalibrationControls();
+  };
+  image.onerror = () => {
+    if (calibrationView !== view || view.previewToken !== token) return;
+    view.loading = false;
+    view.loaded = false;
+    image.hidden = true;
+    $('calMsg').textContent = '此帧无法读取，可能到达视频边界或 revision 已过期；请选择其他候选，或关闭后刷新照片。';
+    updateCalibrationControls();
+  };
+  $('calPreview').replaceChildren(image); // 每次换帧先清空旧图，迟到加载不得冒充所选帧。
+  const camera = view.cameraId ? `&camera_id=${encodeURIComponent(view.cameraId)}` : '';
+  image.src = photoUrl(candidate?.url) || `/api/video-frame?seq=${view.seq}&revision=${encodeURIComponent(view.revision)}&frame_index=${index}${camera}`;
+}
+
+function openCalibration(){
+  const data = videos[aiSeq]?.data;
+  if (data?.status !== 'ready' || data.revision == null) return;
+  const candidates = (data.calibration?.candidates || []).filter(c =>
+    Number.isInteger(c.frame_index_zero_based) && c.frame_index_zero_based >= 0);
+  const frames = (data.frames || []).filter(f => Number.isInteger(f.frame_index_zero_based) && f.frame_index_zero_based >= 0);
+  const impact = data.calibration?.impact_frame_index;
+  const initial = candidates.find(c => c.frame_index_zero_based === impact) ||
+    (Number.isInteger(impact) && impact >= 0 ? { frame_index_zero_based: impact } : null) ||
+    candidates[0] || frames.find(f => /impact/.test(f.name)) || frames[0];
+  if (!initial) return;
+  calibrationView = { seq: aiSeq, revision: data.revision, cameraId: data.camera_id || null, candidates,
+    frameIndex: initial.frame_index_zero_based, requestedIndex: initial.frame_index_zero_based,
+    previewToken: 0, loading: false, loaded: false, busy: false };
+  $('calTitle').textContent = `第 ${aiSeq} 杆 · 人工确认触球帧`;
+  $('calStatus').textContent = calibrationLabel(data) + (oknum(data.calibration?.confidence)
+    ? ` · 定位置信度 ${num(data.calibration.confidence * 100, 0)}%（不代表人工确认）` : '');
+  $('calCandidates').innerHTML = candidates.map((c, i) => {
+    const url = photoUrl(c.url);
+    return `<button data-candidate="${i}">${url ? `<img src="${esc(url)}" alt="触球候选 ${i + 1}">` : ''}
+      <small>候选 ${i + 1} · 帧 ${c.frame_index_zero_based}</small>
+      <small>${oknum(c.actual_container_seconds) ? `容器 ${num(c.actual_container_seconds, 3)}s` : '容器时间未知'}</small></button>`;
+  }).join('') || '<p class="photoNote">暂无额外候选，从触球标记附近逐帧人工检查。</p>';
+  $('calModal').hidden = false;
+  previewCalibration(initial.frame_index_zero_based, initial);
+}
+
+async function confirmCalibration(){
+  const view = calibrationView, data = view && videos[view.seq]?.data;
+  if (!view || view.busy || !view.loaded || view.loading) return;
+  if (view.seq !== aiSeq || data?.status !== 'ready' || String(data.revision) !== String(view.revision)){
+    closeCalibration();
+    return;
+  }
+  view.busy = true;
+  updateCalibrationControls();
+  $('calMsg').textContent = '正在提交人工确认，后端将重跑阶段并按全局照片开关重新分析…';
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 10000);
+  const token = videoEntry(view.seq).token;
+  try {
+    const response = await fetch('/api/video-calibrate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+      body: JSON.stringify({ seq: view.seq, revision: view.revision, frame_index: view.frameIndex,
+        ...(view.cameraId ? { camera_id: view.cameraId } : {}) }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    if (result.ok === false) throw new Error(result.error || '校准未接受');
+    if (isVideoData(result) && result.seq !== view.seq) throw new Error('校准响应杆号不匹配');
+    // 后端负责完成后清除旧分析并仅文本重算，前端不额外 POST /api/analyze 或重发照片。
+    if (videos[view.seq].token === token){
+      delete analyses[view.seq];
+      stopVideoPoll(view.seq);
+      const entry = videoEntry(view.seq);
+      entry.attempts = 0;
+      entry.stopped = false;
+      if (!isVideoData(result) || result.seq !== view.seq){
+        entry.data = { ...data, status: 'pending', frames: [], notice: '已提交人工确认，正在重新准备阶段照片和分析。' };
+        if (view.seq === aiSeq) paintAI();
+      } else acceptVideo(result);
+    }
+    if (calibrationView === view) closeCalibration();
+  } catch (error){
+    if (calibrationView === view){
+      view.busy = false;
+      $('calMsg').textContent = `校准提交失败：${error.name === 'AbortError' ? '请求超时，请刷新照片确认后台状态' : error.message}`;
+      updateCalibrationControls();
+    }
+  } finally { clearTimeout(timeout); }
+}
+
+function visualFindingsHTML(result){
+  const findings = result.visual_findings;
+  if (!Array.isArray(findings) || !findings.length) return '';
+  return `<section class="visualEvidence"><h3>照片观察与证据</h3>${findings.map(f => {
+    if (!f || typeof f !== 'object') return '';
+    const numbers = Array.isArray(f.evidence_frames) ? f.evidence_frames.filter(n => Number.isInteger(n) && n >= 1 && n <= 8) : [];
+    return `<div class="aiItem">${f.title ? `<b>${esc(f.title)}</b>` : ''}<p>${esc(f.detail)}</p>
+      ${numbers.length ? `<span class="ev">照片证据：${numbers.map(n => `照片 ${n}`).join('、')}</span>` : ''}
+      ${oknum(f.confidence) ? `<p class="photoNote">AI 观察置信度 ${num(f.confidence * 100, 0)}%（非测量精度）</p>` : ''}</div>`;
+  }).join('')}<p class="photoNote">照片编号对应上方同杆照片；AI 定性观察不是设备精确测量，不推断精确三维角度。</p></section>`;
 }
 
 function paintAI(){
+  paintPhotoConsent();
+  ensurePhotos(aiSeq);
+  paintPhotos(aiSeq);
   const box = $('aiBody'), hint = $('aiHint');
   const seq = aiSeq;
   const shot = shotBySeq(seq);
-  const res = analyses[seq];
+  const cached = analyses[seq], revision = videos[seq]?.data?.revision;
+  const sameCamera = !cached?.video_camera_id || !videos[seq]?.cameraId || cached.video_camera_id === videos[seq].cameraId;
+  const res = cached && sameCamera && (cached.video_revision == null || revision == null ||
+    String(cached.video_revision) === String(revision)) ? cached : null;
 
   // 球杆下拉框表示"用户想用的球杆"，默认 自动（空值）——不跟着结果显示，
   // 否则用户以为是自己选的，下次分析还会把它当手动覆盖发出去。
@@ -871,8 +1373,9 @@ function paintAI(){
     box.innerHTML = `<div class="aiWait"><div class="spin"></div>
         <div>正在分析第 ${seq} 杆…<small>${
           !aiInfo.use_ai ? '规则诊断中'
-          : aiInfo.configured ? 'AI 正在读数据，通常 3~10 秒'
-          : '未配置 AI Key，先用规则诊断'
+          : aiInfo.configured || aiInfo.vision_enabled && aiInfo.vision_configured
+            ? 'AI 正在分析；图片是否参与以返回的 input_mode 为准'
+            : '未配置 AI 接口，先用规则诊断'
         }</small></div></div>`;
     return;
   }
@@ -896,12 +1399,13 @@ function paintAI(){
       <div class="how">${esc(d.how)}</div></div>`).join('');
 
   const [cls, label] = SRC[res.source] || ['rules', res.source || ''];
-  const foot = [];
+  const foot = [esc(analysisInputLabel(res))];
   if (res.notice) foot.push(esc(res.notice));
   if (res.club_guessed) foot.push('球杆按球速推断，选错会影响判断');
 
   box.innerHTML = `
     ${res.summary ? `<div class="aiSummary">${esc(res.summary)}</div>` : ''}
+    ${visualFindingsHTML(res)}
     <div class="aiCols">
       <div class="aiCol find"><h3>发现了什么</h3>
         ${hl || '<div class="aiItem"><p>这一杆没有特别突出的亮点。</p></div>'}</div>
@@ -916,14 +1420,16 @@ function paintAI(){
     </div>`;
 }
 
-function reanalyze(club){
-  if (!aiSeq) return;
+function reanalyze(club, includePhotos = null){
+  if (!aiSeq || photoModeSaving) return;
   delete analyses[aiSeq];
   paintAI();
   fetch('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seq: aiSeq, club: club || null }),
+    body: JSON.stringify({ seq: aiSeq, club: club || null,
+      ...(typeof includePhotos === 'boolean' ? { include_photos: includePhotos } : {}),
+      ...((includePhotos ?? aiInfo.include_photos) && videos[aiSeq]?.cameraId ? { camera_id: videos[aiSeq].cameraId } : {}) }),
   }).catch(() => {});
 }
 
@@ -935,7 +1441,9 @@ function connect(){
     const d = JSON.parse(e.data);
     shots = d.shots || [];
     analyses = d.analyses || {};
-    aiSeq = shots.length ? shots[shots.length - 1].seq : 0;
+    const nextSeq = shots.some(s => s.seq === aiSeq) ? aiSeq : (shots.length ? shots[shots.length - 1].seq : 0);
+    if (nextSeq !== aiSeq) resetClubPick();
+    aiSeq = nextSeq;
     pendingShot = null;
     freshSeq = -1;
     normState = d.normalize || null;
@@ -944,6 +1452,13 @@ function connect(){
     paintVer(d.build);
     refreshClubFilter();
     renderAll();
+    if (aiSeq){
+      stopVideoPoll(aiSeq);
+      const entry = videoEntry(aiSeq);
+      entry.data = null; // 重连可能漏过 video 事件，握手后重新读取当前杆。
+      entry.attempts = 0;
+      entry.stopped = false;
+    }
     paintAI();
   });
 
@@ -978,9 +1493,15 @@ function connect(){
 
   es.addEventListener('analysis', e => {
     const d = JSON.parse(e.data);
+    if (d.video_camera_id && videos[d.seq]?.cameraId && d.video_camera_id !== videos[d.seq].cameraId) return;
     analyses[d.seq] = d;
     if (d.seq === aiSeq){ paintAI(); paintTable(); }
-    else if (d.seq > aiSeq){ aiSeq = d.seq; paintAI(); paintTable(); }
+  });
+
+  es.addEventListener('video', e => acceptVideo(JSON.parse(e.data)));
+  es.addEventListener('ai_config', e => {
+    acceptAiConfig(JSON.parse(e.data));
+    paintAI();
   });
 
   es.addEventListener('norm', e => {
@@ -1009,10 +1530,77 @@ $('clubFilter').onchange = e => {
   renderAll();
 };
 
+/* ---- 照片与校准交互 ---- */
+$('aiPhotos').onchange = e => {
+  if (e.target.dataset.action === 'camera') changeCamera(aiSeq, e.target.value);
+};
+$('aiPhotos').onclick = e => {
+  const button = e.target.closest('button');
+  if (!button || button.disabled) return;
+  if (button.dataset.action === 'prepare'){
+    if (!aiSeq || !shotBySeq(aiSeq)) return;
+    stopVideoPoll(aiSeq);
+    closeCalibration();
+    const entry = videoEntry(aiSeq);
+    entry.attempts = 0;
+    entry.stopped = false;
+    entry.note = '正在请求重试准备…';
+    entry.data = { ...(entry.data || {}), seq: aiSeq, status: 'pending', frames: [] };
+    requestVideo(aiSeq, true);
+    paintPhotos(aiSeq);
+  } else if (button.dataset.action === 'calibrate') openCalibration();
+  else if (button.dataset.photo != null && Number(button.dataset.seq) === aiSeq){
+    const frame = videos[aiSeq]?.data?.frames?.[Number(button.dataset.photo)];
+    const url = photoUrl(frame?.url);
+    if (!url) return;
+    const image = document.createElement('img');
+    image.alt = `第 ${aiSeq} 杆照片 ${Number(button.dataset.photo) + 1}`;
+    image.onerror = () => {
+      if ($('photoPreview').firstChild !== image) return;
+      image.hidden = true;
+      $('photoDetail').textContent = '照片加载失败，请关闭后重试准备。';
+    };
+    image.src = url;
+    $('photoTitle').textContent = image.alt;
+    $('photoDetail').textContent = '';
+    $('photoPreview').replaceChildren(image);
+    $('photoModal').hidden = false;
+  }
+};
+$('aiPhotos').addEventListener('error', e => {
+  if (e.target.tagName !== 'IMG') return;
+  const button = e.target.closest('button[data-photo]');
+  if (!button) return;
+  e.target.hidden = true;
+  button.disabled = true;
+  button.querySelector('.photoMissing').hidden = false;
+}, true);
+$('photoClose').onclick = () => { $('photoModal').hidden = true; $('photoPreview').replaceChildren(); };
+$('photoModal').onclick = e => { if (e.target.id === 'photoModal') $('photoClose').onclick(); };
+$('calClose').onclick = closeCalibration;
+$('calModal').onclick = e => { if (e.target.id === 'calModal') closeCalibration(); };
+$('calCandidates').onclick = e => {
+  const button = e.target.closest('button[data-candidate]');
+  const candidate = button && calibrationView?.candidates[Number(button.dataset.candidate)];
+  if (candidate) previewCalibration(candidate.frame_index_zero_based, candidate);
+};
+$('calPrev').onclick = () => { if (calibrationView && !$('calPrev').disabled) previewCalibration(calibrationView.frameIndex - 1); };
+$('calNext').onclick = () => { if (calibrationView && !$('calNext').disabled) previewCalibration(calibrationView.frameIndex + 1); };
+$('calConfirm').onclick = confirmCalibration;
+document.addEventListener('keydown', e => {
+  // 设置只由取消/保存成功关闭；Esc 可交给输入法、浏览器粘贴菜单等处理。
+  // 不 preventDefault，保留原生复制/粘贴及输入行为。
+  if (e.key !== 'Escape' || e.isComposing || !$('aiModal').hidden) return;
+  $('photoClose').onclick();
+  closeCalibration();
+});
+
 /* ---- AI 交互 ---- */
+$('aiIncludePhotos').checked = false;
+$('aiIncludePhotos').onchange = savePhotoMode; // 持久化全局模式；不追溯重跑已有杆。
 $('aiClub').onchange = e => {
   clubOverride = e.target.value;          // 只在内存里记，不落 localStorage：不能带到下一杆
-  reanalyze(e.target.value || null);
+  reanalyze(e.target.value || null); // 改球杆重算沿用全局照片开关。
 };
 $('aiRedo').onclick = () => reanalyze($('aiClub').value || null);
 
@@ -1027,21 +1615,29 @@ $('tbody').onclick = e => {
     fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seq: aiSeq, club: $('aiClub').value || null }),
+      body: JSON.stringify({ seq: aiSeq, club: $('aiClub').value || null }), // 由后端全局模式决定。
     }).catch(() => {});
   }
   paintAI(); paintTable();
 };
 
 $('aiCfgBtn').onclick = () => {
+  // 已打开时不能重填表单，否则复制/粘贴过程中的草稿与 Key 会被清空。
+  if (!$('aiModal').hidden) return;
   $('cfgUrl').value = aiInfo.base_url || '';
   $('cfgModel').value = aiInfo.model || '';
   $('cfgKey').value = '';
-  $('cfgMsg').textContent = aiInfo.configured ? '已配置 Key' : '尚未配置 Key，当前只能用规则诊断';
+  $('cfgVisionEnabled').checked = !!aiInfo.vision_enabled;
+  $('cfgVisionUrl').value = aiInfo.vision_base_url || '';
+  $('cfgVisionModel').value = aiInfo.vision_model || '';
+  $('cfgVisionKey').value = '';
+  $('cfgVisionStatus').textContent = aiInfo.vision_configured ? '视觉 Key 已配置（留空保留）；未进行视觉连通性测试。' : '视觉接口尚未配置就绪；照片展示不受影响。';
+  $('cfgMsg').textContent = aiInfo.configured ? '文本 Key 已配置' : '尚未配置文本 Key，当前使用规则诊断';
   $('aiModal').hidden = false;
 };
 $('cfgCancel').onclick = () => { $('aiModal').hidden = true; };
-$('aiModal').onclick = e => { if (e.target.id === 'aiModal') $('aiModal').hidden = true; };
+// 不采用“点遮罩关闭”：选中文字时从输入框拖到遮罩也可能生成遮罩 click。
+$('aiModal').onclick = e => { e.stopPropagation(); };
 
 async function saveAiCfg(){
   return fetch('/api/ai-config', {
@@ -1051,6 +1647,10 @@ async function saveAiCfg(){
       base_url: $('cfgUrl').value.trim(),
       model: $('cfgModel').value.trim(),
       api_key: $('cfgKey').value.trim(),
+      vision_enabled: $('cfgVisionEnabled').checked,
+      vision_base_url: $('cfgVisionUrl').value.trim(),
+      vision_model: $('cfgVisionModel').value.trim(),
+      vision_api_key: $('cfgVisionKey').value.trim(),
     }),
   }).then(r => r.json()).catch(() => ({ ok: false }));
 }
@@ -1059,23 +1659,24 @@ $('cfgSave').onclick = async () => {
   $('cfgMsg').textContent = '保存中…';
   const r = await saveAiCfg();
   if (!r.ok){ $('cfgMsg').textContent = '保存失败'; return; }
-  aiInfo = await fetch('/api/ai').then(x => x.json()).catch(() => aiInfo);
+  acceptAiConfig(await fetch('/api/ai').then(x => x.json()).catch(() => aiInfo));
   $('aiModal').hidden = true;
-  if (aiSeq) reanalyze($('aiClub').value);      // 换模型后立刻重跑这一杆
+  if (aiSeq) reanalyze($('aiClub').value); // 保存模型配置重算沿用全局照片模式。
 };
 
 $('cfgTest').onclick = async () => {
-  $('cfgMsg').textContent = '测试中…（最多 45 秒）';
-  await saveAiCfg();                             // 先落盘，否则测的是旧配置
+  $('cfgMsg').textContent = '仅测试文本接口…（最多 45 秒）';
+  const saved = await saveAiCfg();                 // 先落盘，否则测的是旧配置
+  if (!saved.ok){ $('cfgMsg').textContent = '保存失败，未请求模型测试'; return; }
   const r = await fetch('/api/ai-test', { method: 'POST' })
     .then(x => x.json()).catch(() => ({ ok: false, error: '请求失败' }));
   $('cfgMsg').textContent = r.ok
-    ? '连接正常 · ' + (r.model || '') + '　「' + r.summary + '」'
+    ? '文本接口正常（未测试视觉接口） · ' + (r.model || '') + '　「' + r.summary + '」'
     : '失败：' + r.error;
 };
 
 fetch('/api/ai').then(r => r.json()).then(d => {
-  aiInfo = d;
+  acceptAiConfig(d);
   aiClubs = d.clubs || [];
   fillAiClubs();
   if (clubOverride) $('aiClub').value = clubOverride;
@@ -1084,6 +1685,7 @@ fetch('/api/ai').then(r => r.json()).then(d => {
 
 // 先按"未知"渲染，SSE 握手后立刻被真实状态覆盖
 paintNorm();
+paintAI();
 fetch('/api/status').then(r => r.json()).then(d => {
   if (d.normalize){ normState = d.normalize; paintNorm(); }
   paintVer(d.build);

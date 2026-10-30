@@ -5,6 +5,8 @@ ai_config.json
 
 # ---- 运行时数据（每打一杆就变，不该进仓库）----
 dashboard_shots.jsonl
+# Private swing photos and their linked shot metrics
+video_frames/
 *.log
 
 # ---- 逆向分析与调试产物（体积大、可重新生成）----

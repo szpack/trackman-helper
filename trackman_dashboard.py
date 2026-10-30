@@ -33,6 +33,7 @@ from analysis import analyze, load_config, save_config, CONFIG_FILE
 import pydeps
 import tps_club
 import tps_norm
+from tps_video_store import VideoStore, guid as video_guid
 import version as _ver
 
 HERE = Path(__file__).resolve().parent
@@ -213,9 +214,13 @@ class Hub:
         self.timers = {}         # id -> Timer
         self.analyses = {}       # seq -> 分析结果
         self.use_ai = use_ai
+        self._cfg_lock = threading.RLock()
         self.ai_cfg = load_config()
         self._cfg_mtime = self._cfg_stamp()
         self.ai_queue = queue.Queue()
+        self._analysis_generation = {}
+        self._auto_analysis_jobs = {}
+        self.video_store = VideoStore(self._video_changed)
         self.norm = {"on": None, "method": None, "conf": None, "layout": None,
                      "detail": "尚未检测", "at": 0}
         self._load()
@@ -254,12 +259,38 @@ class Hub:
 
     def _refresh_cfg(self):
         """手动改 ai_config.json 后不必重启看板——下次分析自动读新配置。"""
-        mt = self._cfg_stamp()
-        if mt != self._cfg_mtime:
-            self._cfg_mtime = mt
-            self.ai_cfg = load_config()
-            print(f"[AI] 配置已更新：{self.ai_cfg.get('model')} "
-                  f"{'（已填 Key）' if self.ai_cfg.get('api_key') else '（Key 为空）'}")
+        with self._cfg_lock:
+            mt = self._cfg_stamp()
+            if mt != self._cfg_mtime:
+                self._cfg_mtime = mt
+                self.ai_cfg = load_config()
+                print(f"[AI] 配置已更新：{self.ai_cfg.get('model')} "
+                      f"{'（已填 Key）' if self.ai_cfg.get('api_key') else '（Key 为空）'}")
+
+    def ai_readiness(self):
+        from analysis import _vision_ready
+        with self._cfg_lock:
+            cfg = dict(self.ai_cfg)
+        return {"include_photos": cfg.get("include_photos") is True,
+                "configured": bool(cfg.get("api_key")), "use_ai": self.use_ai,
+                "vision_enabled": cfg.get("vision_enabled") is True,
+                "vision_configured": bool(_vision_ready(dict(cfg, vision_enabled=True)))}
+
+    def set_photo_mode(self, include_photos):
+        if type(include_photos) is not bool:
+            raise ValueError("include_photos 必须是 bool")
+        with self._cfg_lock:
+            saved = save_config({"include_photos": include_photos})
+            self.ai_cfg = saved
+            self._cfg_mtime = self._cfg_stamp()
+            info = self.ai_readiness()
+        self._broadcast("ai_config", info)
+        return dict(info, ok=True)
+
+    def _photos_allowed(self):
+        self._refresh_cfg()
+        with self._cfg_lock:
+            return self.ai_cfg.get("include_photos") is True
 
     def _backfill_clubs(self):
         """历史杆补球杆：老文件里没存球杆，去 TPS 本地库按 MeasurementId 捞回来。"""
@@ -288,7 +319,7 @@ class Hub:
             last = self.shots[-1]
             m = dict(last.get("m") or {})
             if _analyzable(m):
-                self.ai_queue.put((last["seq"], m, last.get("club_override")))
+                self._enqueue_text_analysis(last["seq"], m, last.get("club_override"))
 
     def _load(self):
         if not self.persist or not self.persist.exists():
@@ -300,6 +331,9 @@ class Hub:
                 if not line.strip():
                     continue
                 rec = json.loads(line)
+                # 旧历史把来源放在记录外层；分析队列只传 m，载入时一并带进去。
+                if rec.get("club_src"):
+                    rec.setdefault("m", {})["club_src"] = rec["club_src"]
                 raw_n += 1
                 pid = _shot_id(rec)
                 if pid and pid in index:
@@ -423,7 +457,7 @@ class Hub:
             self._club_retry_later(pid, seq)
 
         if self.use_ai and _analyzable(m):
-            self.ai_queue.put((seq, m, club))
+            self._enqueue_text_analysis(seq, m, club)
         else:
             reason = "数据不完整（缺球速/发射角/后旋），无法分析" if not _analyzable(m) else "AI 已关闭"
             self.analyses[seq] = {
@@ -474,15 +508,74 @@ class Hub:
             old = self.analyses.get(seq) or {}
             if not old or old.get("club_guessed"):
                 self.analyses.pop(seq, None)
-                self.ai_queue.put((seq, m, club))
+                self._enqueue_text_analysis(seq, m, club)
 
 
-    def request_analysis(self, seq, club=None):
-        """重新分析（用户改了球杆时用）。"""
+    def _enqueue_text_analysis(self, seq, m=None, club=None, *, expected_generation=None):
+        """保留旧名字；自动分析沿用入队时的全局开关和本杆摄像头。"""
+        include_photos = self._photos_allowed()
+        with self.lock:
+            generation = self._analysis_generation.get(seq, 0)
+            if expected_generation is not None:
+                if generation != expected_generation:
+                    return
+                rec = next((r for r in self.shots if r.get("seq") == seq), None)
+                if rec is None:
+                    return
+                m, club = dict(rec["m"]), rec.get("club_override")
+            pending = self._auto_analysis_jobs.get(seq)
+            if pending is not None and pending[4] == generation:
+                pending[1], pending[2] = dict(m), club
+                return
+        try:
+            mid = self._video_mid(seq)
+        except ValueError:
+            mid = None
+        captured_camera = None
+        if include_photos and mid:
+            current_camera = self.video_store.current_camera(mid)
+            try:
+                captured_camera = self.video_store.select(mid, current_camera)
+            except (OSError, RuntimeError, ValueError):
+                # 已选镜头暂不可用时仍固定它；不换别的镜头，也不丢掉参数分析。
+                captured_camera = current_camera
+        with self.lock:
+            if generation != self._analysis_generation.get(seq, 0):
+                return
+            pending = self._auto_analysis_jobs.get(seq)
+            if pending is not None and pending[4] == generation:
+                pending[1], pending[2] = dict(m), club
+                return
+            job = [seq, dict(m), club, include_photos, generation, captured_camera, True, mid]
+            self._auto_analysis_jobs[seq] = job
+            self.ai_queue.put(job)
+
+    def request_analysis(self, seq, club=None, include_photos=None, *, camera_id=None):
+        """未指定许可时沿用全局；显式单次请求的摄像头不延迟重新选路。"""
+        dynamic_camera = include_photos is None and camera_id is None
+        global_photos = self._photos_allowed()
+        include_photos = global_photos if include_photos is None else include_photos is True
+        captured_camera, mid = None, None
+        with self.lock:
+            if not any(r.get("seq") == seq for r in self.shots):
+                return False
+            submitted_generation = self._analysis_generation.get(seq, 0)
+        try:
+            mid = self._video_mid(seq)
+        except ValueError:
+            if camera_id is not None:
+                raise ValueError("本杆无法验证摄像头录像归属")
+        if mid and (include_photos or camera_id is not None):
+            selected = self.video_store.select(
+                mid, camera_id if camera_id is not None else self.video_store.current_camera(mid))
+            if include_photos:
+                captured_camera = selected
         with self.lock:
             idx = next((i for i, r in enumerate(self.shots) if r.get("seq") == seq), None)
             if idx is None:
                 return False
+            if include_photos and submitted_generation != self._analysis_generation.get(seq, 0):
+                raise ValueError("提交期间摄像头或分析请求已变化，请重试")
             rec = self.shots[idx]
             if club is not None:
                 rec["club_override"] = club or None
@@ -490,22 +583,188 @@ class Hub:
             m = dict(rec["m"])
             override = rec.get("club_override")
             self.analyses.pop(seq, None)
-        self.ai_queue.put((seq, m, override))
+            generation = self._analysis_generation.get(seq, 0) + 1
+            self._analysis_generation[seq] = generation
+        self.ai_queue.put((seq, m, override, include_photos, generation, captured_camera, dynamic_camera, mid))
         return True
+
+    def _video_mid(self, seq):
+        with self.lock:
+            rec = next((r for r in self.shots if r.get("seq") == seq), None)
+            if rec is None:
+                raise ValueError("击球不存在")
+            return video_guid(_shot_id(rec))
+
+    @staticmethod
+    def _public_video(seq, state):
+        from urllib.parse import urlencode
+        state = dict(state, seq=seq)
+        revision = state.get("revision")
+        def public_frame(frame):
+            result = dict(frame)
+            query = {"seq": seq, "revision": revision, "file": frame["file"]}
+            if state.get("camera_id"):
+                query["camera_id"] = state["camera_id"]
+            result["url"] = "/api/video-image?" + urlencode(query)
+            result.pop("file", None)
+            return result
+        state["frames"] = [public_frame(f) for f in state.get("frames", [])]
+        if state.get("calibration"):
+            state["calibration"] = dict(state["calibration"])
+            state["calibration"]["candidates"] = [public_frame(f) for f in state["calibration"].get("candidates", [])]
+        state.pop("calibration_changed", None)
+        state.pop("selection_changed", None)
+        return state
+
+    def video_info(self, seq, force=False, impact_frame=None, revision=None, *, camera_id=None):
+        try:
+            mid = self._video_mid(seq)
+        except ValueError:
+            if camera_id is not None:
+                raise ValueError("本杆无法验证摄像头录像归属")
+            from tps_video_store import CAMERA_SOURCE
+            return {"seq": seq, "status": "missing", "frames": [], "cameras": [],
+                    "camera_id": None, "camera_key": None, "camera_source": CAMERA_SOURCE,
+                    "notice": "本杆没有可关联的真实击球 ID 或录像"}
+        state = self.video_store.ensure(mid, force=force, impact_frame=impact_frame, revision=revision,
+                                        camera_id=camera_id)
+        return self._public_video(seq, state)
+
+    def _video_changed(self, mid, state):
+        current = self.video_store.current_camera(mid)
+        selected = state.get("camera_id") == current
+        auto_requeues = []
+        with self.lock:
+            seqs = [r["seq"] for r in self.shots if str(_shot_id(r) or "").lower() == mid.lower()]
+            if selected and state.get("selection_changed"):
+                for seq in seqs:
+                    generation = self._analysis_generation.get(seq, 0)
+                    pending = self._auto_analysis_jobs.get(seq)
+                    self._analysis_generation[seq] = generation + 1
+                    if pending is not None and pending[4] == generation:
+                        auto_requeues.append((seq, generation + 1))
+                    old = self.analyses.get(seq) or {}
+                    if old.get("photos_requested") or old.get("video_camera_id"):
+                        self.analyses.pop(seq, None)
+        # helper 会重读配置、shots 和摄像头；不能持有 Hub 锁重入。
+        # 只补排尚未发模型的自动任务；历史/手动任务没有此标记，不额外收费。
+        for seq, generation in auto_requeues:
+            self._enqueue_text_analysis(seq, expected_generation=generation)
+        for seq in seqs:
+            if selected or state.get("camera_id") is None:
+                self._broadcast("video", self._public_video(seq, state))
+            if state.get("calibration_changed"):
+                # 检查和提交持有选路锁，避免广播期间切换后旧校准抢占新分析。
+                with self.video_store.lock:
+                    if state.get("camera_id") == self.video_store.current_camera(mid):
+                        self.request_analysis(seq)
 
     def _analysis_loop(self):
         while True:
             job = self.ai_queue.get()
             if job is None:
                 return
-            seq, m, club = job
-            self._refresh_cfg()
-            try:
-                res = analyze(m, club=club, use_ai=self.use_ai, cfg=self.ai_cfg)
-            except Exception as e:
-                res = {"summary": "", "highlights": [], "issues": [], "drills": [],
-                       "source": "error", "notice": f"分析失败：{e}"}
+            seq, m, club = job[:3]
+            include_photos = len(job) > 3 and job[3] is True
+            camera_id = job[5] if len(job) > 5 else None
+            dynamic_camera = len(job) > 6 and job[6] is True
+            mid = job[7] if len(job) > 7 else None
             with self.lock:
+                generation = job[4] if len(job) > 4 else self._analysis_generation.get(seq, 0)
+                if generation != self._analysis_generation.get(seq, 0):
+                    if self._auto_analysis_jobs.get(seq) is job:
+                        self._auto_analysis_jobs.pop(seq, None)
+                    continue
+            self._refresh_cfg()
+            with self._cfg_lock:
+                cfg = dict(self.ai_cfg)
+            video = None
+            photo_notice = "" if include_photos else (
+                "图片未参与：本次请求仅参数分析" if cfg.get("include_photos") is True else
+                "图片未参与：照片开关关闭")
+            try:
+                if include_photos:
+                    from analysis import _vision_ready
+                    if cfg.get("include_photos") is not True:
+                        photo_notice = "图片未参与：照片开关关闭"
+                    elif not self.use_ai:
+                        photo_notice = "图片未参与：AI 已关闭"
+                    elif cfg.get("vision_enabled") is not True:
+                        photo_notice = "图片未参与：视觉能力未启用"
+                    elif not _vision_ready(cfg):
+                        photo_notice = "图片未参与：视觉配置缺失"
+                    else:
+                        deadline = time.monotonic() + 90
+                        try:
+                            # 仅自动任务允许迟到目录；一旦选到镜头就固定，不借其他杆/镜头。
+                            while dynamic_camera and mid and camera_id is None and time.monotonic() < deadline:
+                                if not self._photos_allowed():
+                                    break
+                                with self.lock:
+                                    if generation != self._analysis_generation.get(seq, 0):
+                                        break
+                                camera_id = self.video_store.select(mid, self.video_store.current_camera(mid))
+                                if camera_id is None:
+                                    time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                            if mid and camera_id is not None and self._photos_allowed():
+                                video = self.video_store.wait(mid, timeout=max(0, deadline - time.monotonic()),
+                                                              camera_id=camera_id)
+                                if video:
+                                    if (video_guid(video["clip"]["video_clip_id"]) != camera_id or
+                                            video_guid(video["clip"]["measurement_id"]) != mid):
+                                        raise ValueError("照片与提交时本杆摄像头不匹配")
+                                    video["expected_measurement_id"] = mid
+                                    video["camera_id"] = camera_id
+                                    video["frames8"] = video["frames"]
+                        except (OSError, RuntimeError, ValueError, KeyError):
+                            video = None
+                        if not video:
+                            photo_notice = "图片未参与：图片就绪等待失败（本杆录像/八图未就绪）"
+                self._refresh_cfg()
+                with self._cfg_lock:
+                    cfg = dict(self.ai_cfg)
+                if include_photos and cfg.get("include_photos") is not True:
+                    video = None
+                    photo_notice = "图片未参与：照片开关关闭"
+                elif video is not None and cfg.get("vision_enabled") is not True:
+                    video = None
+                    photo_notice = "图片未参与：视觉能力未启用"
+                elif video is not None and not _vision_ready(cfg):
+                    video = None
+                    photo_notice = "图片未参与：视觉配置缺失"
+                with self.lock:
+                    if generation != self._analysis_generation.get(seq, 0):
+                        continue
+                    # 等照片时迟到补杆更新同一自动任务，避免排队重复付费。
+                    m, club = job[1:3]
+                    if self._auto_analysis_jobs.get(seq) is job:
+                        self._auto_analysis_jobs.pop(seq, None)
+                def photos_allowed():
+                    allowed = self._photos_allowed()
+                    with self.lock:
+                        if generation != self._analysis_generation.get(seq, 0):
+                            raise RuntimeError("分析请求已过期，不发送模型请求")
+                    return allowed
+                res = analyze(m, club=club, use_ai=self.use_ai, cfg=cfg, video=video,
+                              photos_allowed=photos_allowed)
+                if video is not None and res.get("input_mode") != "vision":
+                    photo_notice = ("图片未参与：照片开关关闭" if not self._photos_allowed() else
+                                    "图片未参与：视觉请求失败（未追加付费重试）")
+                if photo_notice:
+                    res["notice"] = "；".join(filter(None, [res.get("notice"), photo_notice]))
+            except Exception:
+                res = {"summary": "", "highlights": [], "issues": [], "drills": [],
+                       "source": "error", "input_mode": "rules", "image_count": 0,
+                       "notice": "分析失败：图片准备或分析请求失败（未追加付费重试）"}
+            finally:
+                with self.lock:
+                    if self._auto_analysis_jobs.get(seq) is job:
+                        self._auto_analysis_jobs.pop(seq, None)
+            res["video_camera_id"] = camera_id if include_photos else None
+            res["photos_requested"] = include_photos
+            with self.lock:
+                if generation != self._analysis_generation.get(seq, 0):
+                    continue
                 self.analyses[seq] = res
             self._broadcast("analysis", dict(res, seq=seq))
             print(f"[分析] #{seq} [{res.get('source')}] {str(res.get('summary'))[:46]}")
@@ -708,7 +967,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
         u = urlparse(self.path)
-        path, qs = u.path, parse_qs(u.query)
+        path, qs = u.path, parse_qs(u.query, keep_blank_values=True)
         if path in ("/", "/index.html"):
             try:
                 body = HTML_FILE.read_bytes()
@@ -727,14 +986,21 @@ class Handler(BaseHTTPRequestHandler):
             body["normalize"] = self.hub.norm_status()
             body["build"] = _ver.summary()
             self._send(200, json.dumps(body, ensure_ascii=False).encode())
+        elif path in ("/api/video", "/api/video-image", "/api/video-frame"):
+            self._video_get(path, qs)
         elif path == "/api/ai":
-            from analysis import CLUB_ORDER, CLUB_ZH
+            from analysis import CLUB_ORDER, CLUB_ZH, _vision_ready
             cfg = self.hub.ai_cfg
             info = {
                 "configured": bool(cfg.get("api_key")),
                 "use_ai": self.hub.use_ai,
                 "base_url": cfg.get("base_url", ""),
                 "model": cfg.get("model", ""),
+                "include_photos": cfg.get("include_photos") is True,
+                "vision_enabled": cfg.get("vision_enabled") is True,
+                "vision_configured": bool(_vision_ready(dict(cfg, vision_enabled=True))),
+                "vision_base_url": cfg.get("vision_base_url", ""),
+                "vision_model": cfg.get("vision_model", ""),
                 "clubs": [{"key": k, "zh": CLUB_ZH.get(k, k)} for k in CLUB_ORDER],
             }
             self._send(200, json.dumps(info, ensure_ascii=False).encode())
@@ -749,10 +1015,60 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, b'{"error":"not found"}')
 
+    def _video_get(self, path, qs):
+        if not self._same_origin():
+            self._send(403, b'{"error":"local same-origin requests only"}')
+            return
+        try:
+            seq = int((qs.get("seq") or ["0"])[0])
+            if seq <= 0:
+                raise ValueError("无效杆号")
+            camera_id = (qs.get("camera_id") or [None])[0]
+            if path == "/api/video":
+                result = self.hub.video_info(seq, camera_id=camera_id)
+                self._send(200, json.dumps(result, ensure_ascii=False).encode())
+                return
+            mid = self.hub._video_mid(seq)
+            revision = (qs.get("revision") or [""])[0]
+            if path == "/api/video-frame":
+                index = int((qs.get("frame_index") or ["-1"])[0])
+                image = self.hub.video_store.preview(mid, revision, index, camera_id=camera_id)
+            else:
+                filename = (qs.get("file") or [""])[0]
+                image = self.hub.video_store.image(mid, revision, filename, camera_id=camera_id)
+            self._send(200, image.read_bytes(), "image/jpeg")
+        except ValueError as exc:
+            self._send(400, json.dumps({"error": str(exc)[:200]}, ensure_ascii=False).encode())
+        except (OSError, KeyError, RuntimeError) as exc:
+            self._send(404, json.dumps({"error": str(exc)[:200]}, ensure_ascii=False).encode())
+
+    def _same_origin(self):
+        from urllib.parse import urlsplit
+        host = self.headers.get("Host", "")
+        expected_port = self.server.server_address[1]
+        try:
+            parsed = urlsplit("http://" + host)
+            if parsed.hostname not in ("localhost", "127.0.0.1", "::1") or parsed.port != expected_port:
+                return False
+            origin = self.headers.get("Origin")
+            if origin:
+                source = urlsplit(origin)
+                if source.scheme != "http" or source.netloc != host:
+                    return False
+            return self.headers.get("Sec-Fetch-Site") != "cross-site"
+        except ValueError:
+            return False
+
     def do_POST(self):
         path = self.path.split("?")[0]
+        if not self._same_origin():
+            self._send(403, b'{"error":"local same-origin requests only"}')
+            return
         try:
             n = int(self.headers.get("Content-Length") or 0)
+            if not 0 <= n <= 65536:
+                self._send(413, b'{"error":"request too large"}')
+                return
             data = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             data = {}
@@ -765,24 +1081,69 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 seq = 0
             club = data.get("club") or None
-            ok = self.hub.request_analysis(seq, club)
-            self._send(200 if ok else 404,
-                       json.dumps({"ok": ok}, ensure_ascii=False).encode())
+            try:
+                include_photos = data.get("include_photos") is True if "include_photos" in data else None
+                ok = self.hub.request_analysis(seq, club, include_photos=include_photos,
+                                               camera_id=data.get("camera_id"))
+                self._send(200 if ok else 404,
+                           json.dumps({"ok": ok}, ensure_ascii=False).encode())
+            except ValueError as exc:
+                self._send(400, json.dumps({"ok": False, "error": str(exc)[:200]}, ensure_ascii=False).encode())
+
+        elif path in ("/api/video-prepare", "/api/video-calibrate"):
+            try:
+                seq = int(data.get("seq") or 0)
+                kwargs = {"force": True, "camera_id": data.get("camera_id")}
+                if path == "/api/video-calibrate":
+                    index = data.get("frame_index")
+                    if type(index) is not int:
+                        raise ValueError("触球帧必须是整数")
+                    kwargs.update(impact_frame=index, revision=data.get("revision"))
+                result = self.hub.video_info(seq, **kwargs)
+                self._send(200, json.dumps(result, ensure_ascii=False).encode())
+            except (ValueError, OSError) as exc:
+                self._send(400, json.dumps({"ok": False, "error": str(exc)[:200]}, ensure_ascii=False).encode())
+
+        elif path == "/api/ai-photo-mode":
+            if type(data.get("include_photos")) is not bool:
+                self._send(400, json.dumps({"ok": False, "error": "include_photos 必须是 bool"},
+                                           ensure_ascii=False).encode())
+                return
+            try:
+                result = self.hub.set_photo_mode(data["include_photos"])
+            except Exception:
+                self._send(500, json.dumps({"ok": False, "error": "保存照片开关失败，设置未生效"},
+                                           ensure_ascii=False).encode())
+                return
+            self._send(200, json.dumps(result, ensure_ascii=False).encode())
 
         elif path == "/api/ai-config":
-            old = self.hub.ai_cfg
-            key = data.get("api_key")
-            if key in (None, "", "***"):
-                key = old.get("api_key", "")      # 前端留空或不改，就保留原 Key
-            save_config({
-                "base_url": data.get("base_url") or old.get("base_url", ""),
-                "api_key": key,
-                "model": data.get("model") or old.get("model", ""),
-            })
-            with self.hub.lock:
-                self.hub.ai_cfg = load_config()
-            self._send(200, json.dumps({"ok": True, "configured": bool(key)},
-                                       ensure_ascii=False).encode())
+            try:
+                with self.hub._cfg_lock:
+                    self.hub._refresh_cfg()
+                    old = self.hub.ai_cfg
+                    key = data.get("api_key")
+                    if key in (None, "", "***"):
+                        key = old.get("api_key", "")      # 前端留空或不改，就保留原 Key
+                    vision_key = data.get("vision_api_key")
+                    if vision_key in (None, "", "***"):
+                        vision_key = old.get("vision_api_key", "")
+                    self.hub.ai_cfg = save_config({
+                        "base_url": data.get("base_url") or old.get("base_url", ""),
+                        "api_key": key,
+                        "model": data.get("model") or old.get("model", ""),
+                        "vision_enabled": data.get("vision_enabled") is True if "vision_enabled" in data else old.get("vision_enabled", False),
+                        "vision_base_url": data.get("vision_base_url", old.get("vision_base_url", "")),
+                        "vision_model": data.get("vision_model", old.get("vision_model", "")),
+                        "vision_api_key": vision_key,
+                    })
+                    self.hub._cfg_mtime = self.hub._cfg_stamp()
+                    info = self.hub.ai_readiness()
+                self.hub._broadcast("ai_config", info)
+                self._send(200, json.dumps(dict(info, ok=True), ensure_ascii=False).encode())
+            except Exception:
+                self._send(500, json.dumps({"ok": False, "error": "保存 AI 设置失败"},
+                                           ensure_ascii=False).encode())
 
         elif path == "/api/ai-test":
             from analysis import llm_analyze, rule_diagnose
