@@ -568,6 +568,18 @@ def llm_analyze(m, diag, cfg=None, timeout=60):
     return out
 
 
+def club_label(m, resolved, override=None):
+    """给界面看的球杆名：手动指定 > TPS 记录的原名（"56°"）> 基准名（"S杆"）。
+
+    为什么不用 club_zh：56° 挖起杆在基准表里归到 Sand Wedge，直接显示会变成"S杆"，
+    用户会以为自己那根 56° 没被认出来。
+    """
+    if override and override in BENCH:
+        return club_zh(override)
+    raw = str(m.get("clubZh") or "").strip()
+    return raw or club_zh(resolved)
+
+
 def analyze(m, club=None, use_ai=True, cfg=None):
     """主入口：先规则诊断，再尝试大模型；任何异常都降级成规则结论。"""
     resolved, guessed = resolve_club(m, club)
@@ -575,6 +587,7 @@ def analyze(m, club=None, use_ai=True, cfg=None):
     result = _rule_result(diag, m)
     result["club"] = diag["club"]
     result["club_zh"] = club_zh(diag["club"])
+    result["club_label"] = club_label(m, diag["club"], club)
     result["club_guessed"] = guessed
     if not use_ai:
         result["notice"] = "未启用 AI，以下为规则诊断"
@@ -587,6 +600,7 @@ def analyze(m, club=None, use_ai=True, cfg=None):
         ai = llm_analyze(m, diag, cfg)
         ai["club"] = diag["club"]
         ai["club_zh"] = club_zh(diag["club"])
+        ai["club_label"] = result["club_label"]
         ai["club_guessed"] = guessed
         ai["notice"] = ""
         return ai

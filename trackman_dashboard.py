@@ -17,6 +17,7 @@ trackman_dashboard.py — 本地实时击球看板
 
 import argparse
 import json
+import os
 import queue
 import socket
 import sys
@@ -29,6 +30,7 @@ from pathlib import Path
 
 from trackman_live import WSClient, flatten
 from analysis import analyze, load_config, save_config, CONFIG_FILE
+import pydeps
 import tps_club
 import tps_norm
 import version as _ver
@@ -214,7 +216,8 @@ class Hub:
         self.ai_cfg = load_config()
         self._cfg_mtime = self._cfg_stamp()
         self.ai_queue = queue.Queue()
-        self.norm = {"on": None, "method": None, "layout": None, "detail": "尚未检测", "at": 0}
+        self.norm = {"on": None, "method": None, "conf": None, "layout": None,
+                     "detail": "尚未检测", "at": 0}
         self._load()
         threading.Thread(target=self._analysis_loop, daemon=True).start()
         threading.Thread(target=self._backfill_clubs, daemon=True).start()
@@ -231,15 +234,16 @@ class Hub:
         last = object()
         while True:
             cur = w.status()
-            sig = (cur.get("on"), cur.get("method"), cur.get("stale"))
+            sig = (cur.get("on"), cur.get("method"), cur.get("conf"), cur.get("stale"))
             if sig != last:
                 last = sig
                 with self.lock:
                     self.norm = cur
                 self._broadcast("norm", dict(cur))
                 if cur.get("on") is not None:
+                    tag = "推测" if cur.get("conf") == "low" else "实时"
                     print(f"[归一化] TPS Normalize {'开启' if cur['on'] else '关闭'}"
-                          f"（{cur.get('method')}）")
+                          f"（{cur.get('method')}/{tag}）")
             time.sleep(2)
 
     def _cfg_stamp(self):
@@ -272,6 +276,7 @@ class Hub:
                     continue
                 rec["m"].update(info)
                 rec["club_src"] = "tps"
+                self._drop_stale_override(rec, info["club"], seq)
                 hit += 1
         if hit:
             with self.lock:
@@ -401,6 +406,7 @@ class Hub:
             if info:
                 m.update(info)
                 rec["club_src"] = "tps"
+                self._drop_stale_override(rec, info["club"], seq)
             elif m.get("club"):
                 rec["club_src"] = rec.get("club_src") or "payload"
             else:
@@ -412,6 +418,9 @@ class Hub:
         if info:
             self._broadcast("shot", rec)      # 前端补上球杆，不必刷新
             print(f"[杆] #{seq} {info['clubZh']} ({info['clubShort']})")
+        else:
+            # TPS 有时落库比推送慢，或者用户打完才在 TPS 里换杆：隔几秒再补几次
+            self._club_retry_later(pid, seq)
 
         if self.use_ai and _analyzable(m):
             self.ai_queue.put((seq, m, club))
@@ -422,6 +431,51 @@ class Hub:
                 "source": "none", "notice": reason,
             }
             self._broadcast("analysis", dict(self.analyses[seq], seq=seq))
+
+    @staticmethod
+    def _drop_stale_override(rec, club, seq=None):
+        """TPS 库里的球杆是用户在 TPS 里亲手选的，权威性高于看板里的残留覆盖。
+
+        典型场景：上次打 L 杆时页面记住了「L杆」，新的一杆换了 56°，页面的记忆
+        会把它强行按 L杆 分析。这里发现 TPS 给的球杆和覆盖不一致，就把覆盖作废。
+        用户真要改，重选一次即可（重选是在球杆已知之后，不会再被这条规则冲掉）。
+        """
+        old = rec.get("club_override")
+        if old and old != club:
+            rec["club_override"] = None
+            where = f"#{seq} " if seq else ""
+            print(f"[杆] {where}作废残留的手动球杆「{old}」→ 以 TPS 的「{club}」为准")
+
+    def _club_retry_later(self, pid, seq):
+        for d in (6, 18, 45):
+            t = threading.Timer(d, self._club_retry, args=(pid, seq))
+            t.daemon = True
+            t.start()
+
+    def _club_retry(self, pid, seq):
+        """迟到补球杆：查到就更新记录、广播，并把按"推测球杆"跑过的分析重跑一次。"""
+        with self.lock:
+            rec = next((x for x in self.shots if x.get("seq") == seq), None)
+            if rec is None or (rec.get("m") or {}).get("club"):
+                return                       # 已经补上了，别重复查
+        info = tps_club.find_club(pid, tries=1)
+        if not info:
+            return
+        with self.lock:
+            rec.setdefault("m", {}).update(info)
+            rec["club_src"] = "tps"
+            self._drop_stale_override(rec, info["club"], seq)
+            self._rewrite_persist()
+            m = dict(rec["m"])
+            club = rec.get("club_override")
+            self._broadcast("shot", rec)
+        print(f"[杆] #{seq} 迟到补上 {info['clubZh']} ({info['clubShort']})")
+        if self.use_ai and _analyzable(m):
+            old = self.analyses.get(seq) or {}
+            if not old or old.get("club_guessed"):
+                self.analyses.pop(seq, None)
+                self.ai_queue.put((seq, m, club))
+
 
     def request_analysis(self, seq, club=None):
         """重新分析（用户改了球杆时用）。"""
@@ -782,6 +836,34 @@ class Handler(BaseHTTPRequestHandler):
             self.hub.unsubscribe(q)
 
 
+def _reexec_with_deps():
+    """当前解释器缺可选依赖时，换一个装了的解释器重启自己。
+
+    为什么要重启而不是一路走兜底：球杆查询走子进程每次 0.6s、Normalize 检测每次 3s，
+    而换对解释器后分别是 20ms 和 0.9s。看板是被 .bat 拉起来的，用户不该关心
+    "启动它的那个 python 恰好没装 pyodbc"。
+    """
+    if os.environ.get("TM_REEXEC") or os.environ.get("TM_NO_REEXEC"):
+        return False
+    missing = [m for m in ("pyodbc", "uiautomation") if not pydeps.has(m)]
+    if not missing:
+        return False
+    argv = pydeps.find_argv(tuple(missing))
+    if not argv:
+        return False
+    if argv[0].lower() == (sys.executable or "").lower() and len(argv) == 1:
+        return False
+    print(f"[环境] 当前解释器缺 {', '.join(missing)}，换用 {pydeps.describe(argv)} 重启")
+    os.environ["TM_REEXEC"] = "1"
+    try:
+        # 带上 -u：换解释器后还要保持和父进程一样的实时日志
+        os.execv(argv[0], [*argv, "-u", str(Path(__file__).resolve()), *sys.argv[1:]])
+    except Exception as e:                       # noqa: BLE001
+        print(f"[环境] 换解释器失败（{e}），继续用兜底路径")
+        return False
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description="TrackMan 实时击球本地看板")
     ap.add_argument("--port", type=int, default=8770, help="看板端口（默认 8770）")
@@ -795,6 +877,8 @@ def main():
     ap.add_argument("--version", action="version",
                     version=f"trackman-helper {_ver.full_version()}")
     args = ap.parse_args()
+
+    _reexec_with_deps()
 
     persist = Path(args.persist) if args.persist else None
     hub = Hub(persist, use_ai=not args.no_ai)
@@ -831,6 +915,9 @@ def main():
         print(f"  AI：{hub.ai_cfg.get('model')} @ {hub.ai_cfg.get('base_url')}")
     else:
         print("  AI：未配置 Key，先用规则诊断（页面右上角「AI 设置」里填）")
+    deps = [m for m in ("pyodbc", "uiautomation") if not pydeps.has(m)]
+    if deps:
+        print(f"  依赖：缺 {', '.join(deps)}，球杆/Normalize 走兜底路径（较慢）")
     print("  Ctrl+C 退出")
     print("=" * 56)
 

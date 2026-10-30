@@ -11,6 +11,9 @@ set "NO_PROXY=127.0.0.1,localhost"
 set "ARGS=%*"
 
 rem ---------------- locate python ----------------
+rem 顺序有讲究：球杆要读 TPS 的 LocalDB（pyodbc），Normalize 要读 TPS 按钮底色
+rem （uiautomation）。这两个是可选依赖，不是每个 Python 都装了 —— 所以先试外部装的，
+rem 最后才用自带的。都装不上也能跑，看板会自己再找一个装了的解释器，只是多绕一层。
 set "PY="
 
 py -3 -c "import sys" >nul 2>nul
@@ -19,6 +22,12 @@ if not errorlevel 1 set "PY=py -3"
 if not defined PY (
     python -c "import sys" >nul 2>nul
     if not errorlevel 1 set "PY=python"
+)
+
+if not defined PY (
+    for /d %%D in ("%USERPROFILE%\.workbuddy\binaries\python\versions\*") do (
+        if exist "%%D\python.exe" if not defined PY set "PY=%%D\python.exe"
+    )
 )
 
 if not defined PY (

@@ -8,15 +8,26 @@
 1. **UIA + PrintWindow** —— 实时。WPF 的 Normalize 按钮没有 TogglePattern，
    只能读它的底色：激活时整块橙色 (236,105,26)。用 PrintWindow 抓窗口位图，
    TPS 被浏览器挡住、最小化到任务栏之外也照样能读。
+   本进程没装 uiautomation 时，借一个装了的解释器跑本文件的 --json 模式（见 pydeps.py）。
 2. **layout 文件兜底** —— 读 `*.layout` 里的 `<IsNormalizationEnabled>`。
    缺点是 TPS 只在保存布局时（退出 / 切工作区）才写盘，运行中切换不会立刻体现。
+   所以这条路径只能给"参考值"，置信度标 low —— 别拿它当"实测（Normalize 关）"。
 """
 import ctypes
+import json
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from ctypes import wintypes
+from pathlib import Path
+
+try:
+    import pydeps
+except Exception:                                # noqa: BLE001
+    pydeps = None
 
 TPS_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", ""), "TrackMan", "TrackMan Performance Studio")
@@ -30,6 +41,7 @@ _lock = threading.Lock()
 _status = {
     "on": None,          # True / False / None(未知)
     "method": None,      # 'uia' | 'layout' | None
+    "conf": None,        # 'high'(实时读按钮) | 'low'(layout 推测)
     "layout": None,      # 命中的 layout 文件名
     "detail": "",
     "at": 0.0,
@@ -290,17 +302,50 @@ def detect_layout():
         return None, None, f"读 layout 失败：{str(e)[:80]}"
 
 
+def _detect_remote():
+    """本进程没装 uiautomation：借一个装了的解释器跑本文件的 --json 模式。
+
+    看板可能被任意 python.exe 拉起（见 pydeps.py），缺依赖时不能直接放弃 ——
+    一放弃就退回 layout 文件，用户会看到"实测（Normalize 关）"这种错结论。
+    """
+    if pydeps is None:
+        return None, "未安装 uiautomation，也没有 pydeps 可借"
+    argv = pydeps.find_argv(("uiautomation",))
+    if not argv:
+        return None, "未安装 uiautomation，本机也没有能借的解释器"
+    try:
+        p = subprocess.run([*argv, str(Path(__file__).resolve()), "--json"],
+                           capture_output=True, timeout=25,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        txt = (p.stdout or b"").decode("utf-8", "replace").strip()
+        d = json.loads(txt[txt.find("{"):txt.rfind("}") + 1] or "{}")
+        if d.get("on") is None:
+            return None, d.get("detail") or "借来的解释器也读不到"
+        return d["on"], f"借 {Path(argv[0]).name}；{d.get('detail') or ''}"
+    except Exception as e:                      # noqa: BLE001
+        return None, f"借解释器失败：{type(e).__name__}: {str(e)[:80]}"
+
+
 def detect():
-    on, detail = detect_uia()
+    try:
+        import uiautomation  # noqa: F401
+        on, detail = detect_uia()
+    except Exception:                           # noqa: BLE001
+        on, detail = _detect_remote()
     if on is not None:
-        return {"on": on, "method": "uia", "layout": None, "detail": detail, "at": time.time()}
+        return {"on": on, "method": "uia", "conf": "high", "layout": None,
+                "detail": detail, "at": time.time()}
     on2, layout, detail2 = detect_layout()
     method = "layout" if on2 is not None else None
     return {
-        "on": on2, "method": method, "layout": layout,
+        "on": on2, "method": method,
+        # layout 只在保存布局时写盘，运行中切开关不会立刻反映 —— 只能算参考
+        "conf": "low" if on2 is not None else None,
+        "layout": layout,
         "detail": detail2 if on2 is not None else f"{detail}；{detail2}",
         "at": time.time(),
     }
+
 
 
 class Watcher:
@@ -322,7 +367,7 @@ class Watcher:
             try:
                 res = detect()
             except Exception as e:              # noqa: BLE001
-                res = {"on": None, "method": None, "layout": None,
+                res = {"on": None, "method": None, "conf": None, "layout": None,
                        "detail": f"检测异常：{str(e)[:80]}", "at": time.time()}
             with _lock:
                 # 读不到时别把已知状态抹掉，只标记来源失效
@@ -354,6 +399,9 @@ def watcher():
 
 
 if __name__ == "__main__":
+    if "--json" in sys.argv:                    # 给"借解释器"模式用，别混日志文字
+        print(json.dumps(detect(), ensure_ascii=False))
+        sys.exit(0)
     t0 = time.time()
     r = detect()
     print(r, f"{time.time()-t0:.2f}s")

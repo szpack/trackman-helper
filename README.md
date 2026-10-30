@@ -250,8 +250,25 @@ python version.py            # 看完整版本（本地开发会带 -dev.N+g<sha
 pip install -r requirements.txt
 ```
 
-- `pyodbc` — 识别球杆（读 TPS 本地 LocalDB）。缺了球杆显示"未识别"，AI 分析会退回按球速猜球杆
-- `uiautomation` + `Pillow` — 识别 TPS 的 Normalize 开关。缺了徽章显示"未识别"
+- `pyodbc` — 识别球杆（读 TPS 本地 LocalDB）
+- `uiautomation` + `Pillow` — 识别 TPS 的 Normalize 开关（读按钮底色）
+
+**装在哪不重要，但必须是"启动看板的那个" Python**。为此做了两层兜底，避免出现
+"明明装了却显示未识别"：
+
+1. `pydeps.py` 会在本机找装了该依赖的解释器，自己换过去重启（`os.execv`），
+   换成功就是 20ms / 0.9s 的原生速度；
+2. 换不过去也不放弃：`tps_club` 借那个解释器跑 `--json` 模式查库（约 0.6s），
+   `tps_norm` 同样借它读按钮状态，最后才退到 PowerShell / layout 文件。
+
+Normalize 徽章有三种可信度，别搞混：
+
+| 徽章 | 含义 |
+| --- | --- |
+| `TPS 归一化中` / `实测（Normalize 关）` | UIA 实时读的按钮底色，可信 |
+| `Normalize 待确认`（虚线边框） | 从 layout 文件推测的。layout 只在保存布局时写盘，运行中切开关不反映 |
+| `Normalize 未识别` | 两条路都没读到（TPS 不在击球分析界面 / 没启动） |
+
 
 ## 常见问题
 
@@ -266,6 +283,16 @@ pip install -r requirements.txt
 
 **看板能连但一直没数据**
 TPS 连上设备了吗（看顶部设备状态）？以及是否有人在打。`Measuring` 状态说明设备正在测量。
+
+**球杆显示"未识别"，但 TPS 界面上明明有**
+球杆不在设备推送里，只能按 `MeasurementId` 去 TPS 本地库 `Strokes` 表反查。两种常见原因：
+TPS 落库比推送慢（看板会在 6s / 18s / 45s 自动重试补上），或者启动看板的 Python 没装 `pyodbc`
+（见上面「可选依赖」——现在会自动换解释器，不会静默降级了）。
+自检：`curl http://127.0.0.1:8770/api/status` 看 `clubDb.driver` 是不是 `pyodbc`。
+
+**手动选过球杆，结果新的一杆也被按那根杆分析**
+已修：手动指定只作用于当前这一杆，换杆不再记忆。TPS 里记录的球杆是权威值，
+残留的手动选择会被作废（日志里能看到「作废残留的手动球杆」）。
 
 ---
 

@@ -131,6 +131,8 @@
   }
   .normBadge.on{background:rgba(240,136,62,.18);color:#ffa657;border-color:rgba(240,136,62,.45)}
   .normBadge.ok{background:rgba(63,185,80,.14);color:#56d364;border-color:rgba(63,185,80,.35)}
+  .normBadge.soft{background:rgba(210,153,34,.12);color:#d29922;border-color:rgba(210,153,34,.35);
+    border-style:dashed}
   .normNote{
     margin-top:9px;font-size:13.5px;line-height:1.6;color:#ffb37a;
     display:flex;gap:8px;align-items:flex-start;
@@ -363,7 +365,7 @@
     <h2>AI 教练分析
       <em id="aiHint">每杆算完自动分析</em>
       <div class="aiTools">
-        <select id="aiClub" title="球杆会影响基准判断，选错会误判"></select>
+        <select id="aiClub" title="默认自动：以 TPS 里选的球杆为准；手动改只影响当前这一杆"></select>
         <button id="aiRedo" title="用当前球杆重新分析这一杆">重新分析</button>
         <button id="aiCfgBtn" title="配置大模型">AI 设置</button>
       </div>
@@ -425,8 +427,10 @@ let aiSeq = 0;                     // 当前显示哪一杆的分析
 let aiInfo = { configured: false, use_ai: true, model: '' };
 let aiClubs = [];
 let pendingShot = null;            // 设备正在计算的杆
-let clubOverride = localStorage.getItem('tm-club') || '';
-let normState = null;          // TPS Normalize 开关：{on, method, layout, detail, stale}
+// 手动指定球杆只作用于"当前这一杆"，不跨杆记忆：
+// 之前把选择存进 localStorage，结果打 56° 时页面还按上次的 L杆 去分析，球杆就"认错"了。
+let clubOverride = '';
+let normState = null;          // TPS Normalize 开关：{on, method, conf, layout, detail, stale}
 
 const $ = id => document.getElementById(id);
 const U = () => metric
@@ -581,11 +585,15 @@ const NORM_TEXT = {
         'TPS 的 Normalize 已开启：它显示的距离是归一化到标准大气条件后的值。本看板显示的是设备推送的实测原始值，两者通常差 3~5%。'],
   off: ['实测（Normalize 关）', 'ok',
         'TPS 的 Normalize 是关闭的，两边都是实测值，可以直接对比。'],
+  soft: ['Normalize 待确认', 'soft',
+        '这个状态是从 TPS 的 layout 文件读的，而 layout 只在保存布局时才写盘，' +
+        '运行中切换开关不会立刻反映，所以只能当参考。看板上开着 TPS 到击球分析界面就能实时读按钮状态了。'],
   unknown: ['Normalize 未识别', '',
         '读不到 TPS 的 Normalize 状态（窗口不在击球分析界面，或 TPS 没运行时更常见）。此时不清楚两边距离口径是否一致。'],
 };
 function normKey(){
   if (!normState || normState.on === null || normState.on === undefined) return 'unknown';
+  if (normState.conf === 'low') return 'soft';       // layout 推测，不能当实测
   return normState.on ? 'on' : 'off';
 }
 /* ---- 版本号：dev 后缀说明跑的不是发版代码 ---- */
@@ -829,8 +837,15 @@ function shotBySeq(seq){
 
 function fillAiClubs(){
   const sel = $('aiClub');
-  sel.innerHTML = aiClubs.map(c =>
+  sel.innerHTML = `<option value="">自动（按 TPS 的球杆）</option>` + aiClubs.map(c =>
     `<option value="${esc(c.key)}">${esc(c.zh)}</option>`).join('');
+}
+
+/* 球杆手动指定只对当前这一杆有效，换杆 / 换分析对象都回到"自动" */
+function resetClubPick(){
+  clubOverride = '';
+  const sel = $('aiClub');
+  if (sel) sel.value = '';
 }
 
 function paintAI(){
@@ -839,8 +854,8 @@ function paintAI(){
   const shot = shotBySeq(seq);
   const res = analyses[seq];
 
-  // 球杆选择器跟随这一杆的结果
-  if (res && res.club && $('aiClub').value !== res.club) $('aiClub').value = res.club;
+  // 球杆下拉框表示"用户想用的球杆"，默认 自动（空值）——不跟着结果显示，
+  // 否则用户以为是自己选的，下次分析还会把它当手动覆盖发出去。
 
   if (!seq || !shot){
     hint.textContent = '每杆算完自动分析';
@@ -862,8 +877,9 @@ function paintAI(){
     return;
   }
 
-  const clubZh = res.club_zh || ($('aiClub').selectedOptions[0]?.textContent || '');
-  hint.textContent = `第 ${seq} 杆${clubZh ? ' · ' + clubZh : ''}`;
+  const clubZh = res.club_label || res.club_zh || ($('aiClub').selectedOptions[0]?.textContent || '');
+  const srcTag = res.club_guessed ? '（按球速推断）' : (res.club ? '（TPS 识别）' : '');
+  hint.textContent = `第 ${seq} 杆${clubZh ? ' · ' + clubZh + srcTag : ''}`;
 
   const hl = (res.highlights || []).map(h =>
     `<div class="aiItem"><b>${esc(h.title)}</b><p>${esc(h.detail)}</p></div>`).join('');
@@ -951,8 +967,11 @@ function connect(){
     else shots.push(rec);
     freshSeq = rec.seq;
     pendingShot = null;
-    aiSeq = rec.seq;                 // 分析自动切到最新一杆
-    delete analyses[rec.seq];
+    if (rec.seq !== aiSeq){
+      aiSeq = rec.seq;               // 分析自动切到最新一杆
+      resetClubPick();               // 新的一杆：球杆选择回到"自动"
+      delete analyses[rec.seq];      // 这一杆的结果还没来
+    }
     refreshClubFilter();
     paintKpis(); paintLatest(); paintTrend(); paintScatter(); paintTable(); paintAI();
   });
@@ -992,17 +1011,18 @@ $('clubFilter').onchange = e => {
 
 /* ---- AI 交互 ---- */
 $('aiClub').onchange = e => {
-  localStorage.setItem('tm-club', e.target.value);
-  clubOverride = e.target.value;
-  reanalyze(e.target.value);
+  clubOverride = e.target.value;          // 只在内存里记，不落 localStorage：不能带到下一杆
+  reanalyze(e.target.value || null);
 };
-$('aiRedo').onclick = () => reanalyze($('aiClub').value);
+$('aiRedo').onclick = () => reanalyze($('aiClub').value || null);
 
 // 点历史行 → 切换分析对象；没有分析结果的杆现场请求一次
 $('tbody').onclick = e => {
   const tr = e.target.closest('tr[data-seq]');
   if (!tr) return;
-  aiSeq = +tr.dataset.seq;
+  const seq = +tr.dataset.seq;
+  if (seq !== aiSeq) resetClubPick();     // 换了一杆，之前的手动球杆不该跟过来
+  aiSeq = seq;
   if (!analyses[aiSeq]){
     fetch('/api/analyze', {
       method: 'POST',

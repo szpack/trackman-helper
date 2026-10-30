@@ -12,16 +12,19 @@ tps_club.py — 从 TPS 本地数据库取「这一杆用的是哪根杆」
   Strokes.Data 的 XML 里 <MeasurementId> 与设备推送的 Measurement.Id 完全相同，
   用这个去重 ID 直查，不会错配。
 
-连接方式：
-  pyodbc + LocalDB 命名管道（旧版 "SQL Server" ODBC 驱动不认 (localdb)\\ 语法，
-  但认 np:\\\\.\\pipe\\LOCALDB#xxxx\\tsql\\query）。实测单次查询 20ms 左右。
-  pyodbc 不可用时退回 PowerShell + .NET SqlClient。
+连接方式（三层，按可靠性排）：
+  1. pyodbc + LocalDB 命名管道（旧版 "SQL Server" ODBC 驱动不认 (localdb)\\ 语法，
+     但认 np:\\\\.\\pipe\\LOCALDB#xxxx\\tsql\\query）。实测单次查询 20ms 左右。
+  2. 本进程没装 pyodbc 时，借一个**装了 pyodbc 的解释器**跑本文件的 --json 模式
+     （看板可能被任意 python.exe 拉起，见 pydeps.py）。
+  3. 再不行才退 PowerShell + .NET SqlClient（慢，且依赖 powershell.exe 可用）。
 """
 
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +33,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PS_SCRIPT = HERE / "tps_club.ps1"
 DB_NAME = "TrackMan Performance Studio"
+
+try:
+    import pydeps
+except Exception:                                # noqa: BLE001
+    pydeps = None
 
 # TrackMan 的 ClubType 枚举 -> (诊断基准名, 中文显示名, 缩写)
 # 基准名必须是 analysis.BENCH 里的键；混合杆借用同号铁杆的基准。
@@ -110,7 +118,8 @@ class TpsClub:
         self._cn = None
         self._pipe = None
         self._lock = threading.Lock()
-        self._driver = None      # 'pyodbc' | 'powershell' | None
+        self._driver = None      # 'pyodbc' | 'python' | 'powershell' | None
+        self._helper_argv = None
         self.last_error = None
         self.ok = False
         self._probe()
@@ -140,7 +149,17 @@ class TpsClub:
         return False
 
     def _probe(self):
-        if self._try_pyodbc():
+        best = self._best_pyodbc_argv()
+        if best is None:
+            self.last_error = "本机找不到带 pyodbc 的 Python"
+        elif best[0].lower() == (sys.executable or "").lower():
+            if self._try_pyodbc():
+                self.ok = True
+                return
+        else:
+            # 别的解释器有 pyodbc，但还没验证它连得上库：交给首次查询确认
+            self._helper_argv = best
+            self._driver = "python"
             self.ok = True
             return
         if PS_SCRIPT.exists():
@@ -150,13 +169,25 @@ class TpsClub:
         self._driver = None
         self.ok = False
 
+    def _best_pyodbc_argv(self):
+        """找一个能 import pyodbc 的解释器启动参数；本进程有就直接用本进程。"""
+        try:
+            import pyodbc  # noqa: F401
+            return [sys.executable]
+        except ImportError:
+            pass
+        if pydeps is None:
+            return None
+        return pydeps.find_argv(("pyodbc",))
+
     def _ensure(self):
         """连接断了（TPS 重启、LocalDB 换管道）就重连一次。"""
         if self._driver == "pyodbc" and self._cn is not None:
             return True
-        if self._driver == "powershell":
+        if self._driver in ("powershell", "python"):
             return True
         return self._try_pyodbc()
+
 
     # ---------------- 查询 ----------------
     def _via_pyodbc(self, retry=True):
@@ -195,6 +226,40 @@ class TpsClub:
             # 管道可能换了（TPS 重启），重连后只再试一次
             if retry and self._try_pyodbc():
                 return self._via_pyodbc(retry=False)
+            return None
+
+    def _via_helper(self):
+        """本进程没装 pyodbc：借一个装了 pyodbc 的解释器跑本文件的 --json 模式。
+
+        比 PowerShell 兜底快且稳（不用起 .NET 宿主、不依赖执行策略），代价是一次
+        进程启停（约 0.3s）——只在缺依赖的环境里发生，有 pyodbc 时永远走不到这。
+        """
+        if self._helper_argv is None:
+            self._helper_argv = self._best_pyodbc_argv()
+        if not self._helper_argv:
+            self.last_error = "本机找不到带 pyodbc 的 Python"
+            self.ok = False
+            return None
+        try:
+            cmd = [*self._helper_argv, str(Path(__file__).resolve()), "--json", str(self.take)]
+            p = subprocess.run(cmd, capture_output=True, timeout=25,
+                               creationflags=0x08000000 if os.name == "nt" else 0)
+            txt = (p.stdout or b"").decode("utf-8", "replace").strip()
+            if not txt:
+                self.last_error = "helper 无输出 " + \
+                    (p.stderr or b"").decode("utf-8", "replace")[:120]
+                self.ok = False
+                return None
+            data = json.loads(txt[txt.find("["):txt.rfind("]") + 1] or "[]")
+            if not isinstance(data, list):
+                self.last_error = "helper 返回格式异常"
+                self.ok = False
+                return None
+            self.ok, self.last_error = True, None
+            return data
+        except Exception as e:                       # noqa: BLE001
+            self.last_error = f"{type(e).__name__}: {e}"[:140]
+            self.ok = False
             return None
 
     def _via_powershell(self):
@@ -238,12 +303,18 @@ class TpsClub:
                 rows = self._via_pyodbc()
                 if rows is not None:
                     return rows
+            if self._driver == "python" or self._best_pyodbc_argv() is not None:
+                rows = self._via_helper()
+                if rows is not None:
+                    self._driver = "python"
+                    return rows
             if PS_SCRIPT.exists():
                 rows = self._via_powershell()
                 if rows is not None:
                     self._driver = "powershell"
                     return rows
             return None
+
 
     def find(self, mid, tries=4, wait=0.6):
         """按 MeasurementId 找球杆。找不到就重试——TPS 算完到落库有几秒差。"""
@@ -315,6 +386,15 @@ def find_club(mid, tries=4, wait=0.6):
 
 if __name__ == "__main__":
     import sys
+
+    # --json [N]：给"借解释器"模式用。只吐 JSON 数组，别混任何日志文字。
+    if len(sys.argv) > 1 and sys.argv[1] == "--json":
+        take = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+        q = TpsClub(take=take)
+        rows = q._via_pyodbc() or []
+        print(json.dumps(rows, ensure_ascii=False))
+        sys.exit(0 if rows else 1)
+
     t = TpsClub()
     print("status:", t.status())
     if len(sys.argv) > 1:
@@ -325,3 +405,4 @@ if __name__ == "__main__":
         for r in (t.fetch() or [])[:6]:
             print(r["createdAt"], r["clubType"], r["clubName"],
                   describe(r["clubType"], r["clubName"]))
+
